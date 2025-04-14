@@ -1,0 +1,138 @@
+---
+title: "Mouse_dermal"
+format: html
+editor: visual
+---
+
+## Read in Downloaded GEO counts:
+
+```{r}
+library(Seurat)
+library(Matrix)
+
+# List all subjects by finding unique prefixes in the filenames
+file_list <- list.files(path ="../../GSE223109_RAW", pattern = ".*\\.mtx")  # Get only matrix files
+subject_ids <- gsub("matrix.mtx", "", file_list)  # Extract subject IDs
+
+```
+
+```{r}
+setwd("../../GSE223109_RAW/")
+# Initialize list to store Seurat objects
+seurat_list <- list()
+
+for (subject in subject_ids) {
+  # Read files for the subject
+  counts <- ReadMtx(mtx = paste0(subject, "matrix.mtx"),
+                    features = paste0(subject, "features.tsv"),
+                    cells = paste0(subject, "barcodes.tsv"))
+  
+  # Create a Seurat object and store it in the list
+  seurat_obj <- CreateSeuratObject(counts = counts, project = subject)
+  
+  # Calculate mitochondrial gene percentage
+  seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^mt-")  # Human: "^MT-", Mouse: "^mt-"
+  
+  # Apply QC filters (850-7800 features & <13% mitochondrial genes)
+  seurat_obj <- subset(seurat_obj, nFeature_RNA > 850 & nFeature_RNA < 7800 & percent.mt < 13)
+  
+  # Normalize using SCTransform
+  # seurat_obj <- SCTransform(seurat_obj, verbose = FALSE)
+  
+  # Store the processed Seurat object
+  seurat_list[[subject]] <- seurat_obj
+  
+}
+
+# Merge all Seurat objects
+merged_seurat <- merge(seurat_list[[1]], y = seurat_list[-1], add.cell.ids = subject_ids)
+
+
+```
+
+Take TauFisher clustering:
+
+```{r}
+library(tidyverse)
+cell_assignments = openxlsx::read.xlsx("~/Downloads/41467_2024_48041_MOESM11_ESM (1).xlsx", sheet = "SuppFig4") %>%
+  separate_wider_delim(cellnames, delim = "_", names = c("barcode", "suffix"), cols_remove = F) %>%
+  unite("match_me", 1:2, remove = F)
+
+matches <- stringr::str_match(colnames(merged_seurat) , "ZT(\\d+)R(\\d+)_([A-Z]+-1)$")
+
+zt_nums <- matches[, 2]
+r_nums <- matches[, 3]
+barcode <- matches[,4]
+
+merged_seurat$ZT = zt_nums
+merged_seurat$Rep = r_nums
+
+seurat_cells = paste(zt_nums, barcode, sep = "_")
+
+#Are all cells listed in the supp also in my data?
+stopifnot(all(cell_assignments$match_me %in% seurat_cells))
+
+#which cells are in my data, not in supp (we expect the "muscle and endothelial cells" arn't here)
+# which(!(seurat_cells %in% cell_assignments$match_me))
+
+merged_seurat$seurat_clusters = cell_assignments$celltype[match(seurat_cells, cell_assignments$match_me)]
+
+```
+
+## Now do Methods of Moments analysis (ORPHEUS)
+
+## Immune cells
+
+```{r}
+tmp = Orpheus::extract_clstr_prep_input(merged_seurat, "Immune cells")
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+matches <- stringr::str_match(colnames(pb_mat) , "_ZT(\\d+)R(\\d+)$")
+ZT = as.numeric(matches[,2])
+Rep = as.numeric(matches[,3])
+ZT_full = (Rep-1)*24+ZT 
+
+immune_pb_cycling = is_cycling(ZT_full, pb_mat)
+immune_var_cycling = var_cycling(ZT_full, var_mat, pb_mat)
+
+immune_phi = Orpheus::calc_phi(ZT_full, pb_cycling_results = immune_pb_cycling, var_cycling_results = immune_var_cycling)
+
+Orpheus::plot_rhythms(ZT_full, var_mat = var_mat, mean_mat = pb_mat, plot_me = c("Ly6e"))
+```
+
+## Fibroblasts
+
+```{r}
+tmp = Orpheus::extract_clstr_prep_input(merged_seurat, "Fibroblasts")
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+matches <- stringr::str_match(colnames(pb_mat) , "_ZT(\\d+)R(\\d+)$")
+ZT = as.numeric(matches[,2])
+Rep = as.numeric(matches[,3])
+ZT_full = (Rep-1)*24+ZT 
+
+fibro_pb_cycling = is_cycling(ZT_full, pb_mat)
+fibro_var_cycling = var_cycling(ZT_full, var_mat, pb_mat)
+
+fibro_phi = Orpheus::calc_phi(ZT_full, pb_cycling_results = fibro_pb_cycling, var_cycling_results = fibro_var_cycling)
+
+Orpheus::plot_rhythms(ZT_full, var_mat = var_mat, mean_mat = pb_mat, plot_me = c("Dusp1"))
+```
+
+## Comparison
+
+```{r}
+df_long = merge(fibro_pb_cycling, immune_pb_cycling, by = "Gene_Symbols", suffixes = c("_fibro", "_immune")) %>%   mutate(across(-Gene_Symbols, as.numeric)) %>%
+  filter(p_statistic_fibro<0.05 & p_statistic_immune < 0.05)%>%
+pivot_longer(cols = c(amplitude_bulk_fibro, amplitude_bulk_immune), names_to = "cell_type", values_to = "pb_amp")
+
+
+
+# Violin plot
+ggplot(df_long, aes(x = cell_type, y = pb_amp)) +
+  geom_violin(fill = "skyblue", color = "black") +
+  theme_minimal() +
+  labs(title = "= PB amp Fibro vs Immune", x = "Cell Type", y = "pb_amp")+ylim(0, 1)
+```

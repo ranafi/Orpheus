@@ -1,0 +1,55 @@
+---
+title: "Mouse_dermal"
+format: html
+editor: visual
+---
+
+## Read in Downloaded GEO counts:
+
+```{r}
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+library(Orpheus)
+seurat_obj = readRDS("../../20240529.snTC.integrated.rpca.RDS")
+```
+
+Take TauFisher clustering:
+
+```{r}
+DimPlot(seurat_obj, reduction = "umap", group.by = "seurat_clusters")
+```
+
+Add ZT information to Seurat object:
+
+```{r}
+table(seurat_obj$day, seurat_obj$orig.ident)
+#So ZT00 is from day 'two', all other time points are from day 1
+
+matches <- stringr::str_match(seurat_obj$orig.ident , "ZT(\\d+)\\w+$")
+ZT = as.numeric(matches[,2])
+seurat_obj$ZT = ZT
+```
+
+## Now do Methods of Moments analysis (ORPHEUS)
+
+```{r}
+
+cluster_phis = list()
+for(cluster_id in unique(seurat_obj$seurat_clusters)){
+  tmp =extract_clstr_prep_input(seurat_obj, cluster_id = cluster_id)
+
+  pb_mat = tmp[[1]]
+  var_mat = tmp[[2]]
+  
+  matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)\\w+$")
+  ZT = as.numeric(matches[,2])
+  
+  phi_preds = Orpheus::calc_phi(ZT, pb_mat, var_mat)
+  var_cycling(ZT, var_mat[rownames(phi_preds), ], pb_mat[rownames(phi_preds),], plot_me = rownames(phi_preds))
+  cluster_phis <- append(cluster_phis, list(phi_preds))
+
+}
+
+
+```

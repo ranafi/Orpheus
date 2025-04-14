@@ -1,0 +1,24 @@
+Package: Orpheus
+Type: Package
+Title: Single cell phase spread analysis
+Version: 1.0.0
+Author: Henry Hollis
+Maintainer: Henry Hollis <henry.hollis@pennmedicine.upenn.edu>
+Description: Tools for detecting the phase spread of single cell rhythms
+License: GPL-3
+Encoding: UTF-8
+Imports:
+    dplyr,
+    foreach,
+    graphics,
+    rlang,
+    Seurat,
+    SeuratObject,
+    stats,
+    tibble,
+    tidyr,
+    Matrix
+RoxygenNote: 7.3.2
+Suggests: 
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
