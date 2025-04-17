@@ -96,9 +96,30 @@ ZT_full = (Rep-1)*24+ZT
 immune_pb_cycling = is_cycling(ZT_full, pb_mat)
 immune_var_cycling = var_cycling(ZT_full, var_mat, pb_mat)
 
-immune_phi = Orpheus::calc_phi(ZT_full, pb_cycling_results = immune_pb_cycling, var_cycling_results = immune_var_cycling)
+immune_JTK = var_cycling_JTK(ZT_full, var_mat, pb_mat, out_file_circ = "input_12hr.txt", out_file_mean = "input_24hr.txt", out_file_pb = "input_pb.txt",out_dir = "output/")
 
-Orpheus::plot_rhythms(ZT_full, var_mat = var_mat, mean_mat = pb_mat, plot_me = c("Ly6e"))
+immune_doub_cyclers_JTK = immune_JTK[[1]]
+immune_fund_cycling_JTK = immune_JTK[[2]]
+immune_pb_cyclers_JTK = immune_JTK[[3]] %>% mutate(acrophase_bulk = acrophase_bulk*pi/12)
+
+immune_var_cycling_JTK = merge(immune_doub_cyclers_JTK, immune_fund_cycling_JTK , by = "Gene_Symbols", all = TRUE) %>% mutate(double_freq_acrophase =double_freq_acrophase*pi/12 ) %>% mutate(fund_acro = fund_acro *pi/12)
+
+
+merge(immune_var_cycling, immune_var_cycling_JTK, by = "Gene_Symbols", suffixes = c("_cos","_JTK" )) %>%
+   filter(double_freq_p_statistic_cos < 0.05 & double_freq_p_statistic_JTK < 0.05)%>%
+ ggplot()+
+   geom_point(aes((as.numeric(double_freq_acrophase_cos)) %% pi,as.numeric(double_freq_acrophase_JTK)))
+
+merge(immune_pb_cycling, immune_pb_cyclers_JTK, by = "Gene_Symbols", suffixes = c("_cos","_JTK" )) %>%
+   filter(p_statistic_cos < 0.05 & p_statistic_JTK < 0.05)%>%
+ ggplot()+
+   geom_point(aes((as.numeric(acrophase_bulk_cos)),as.numeric(acrophase_bulk_JTK)))+ylim(c(0,2*pi))+xlim(c(0,2*pi))
+
+immune_phi = Orpheus::calc_phi(ZT_full, pb_cycling_results = immune_pb_cycling, var_cycling_results = immune_var_cycling, var_p_thr = 1, expected_acrodiff_thr = 1)
+
+immune_phi_JTK = Orpheus::calc_phi(ZT_full, pb_cycling_results = immune_pb_cyclers_JTK, var_cycling_results = immune_var_cycling_JTK, var_p_thr = .1, expected_acrodiff_thr = 3/12*pi)
+
+# Orpheus::plot_rhythms(ZT_full, var_mat = var_mat, mean_mat = pb_mat, plot_me = c("Alox5ap"))
 ```
 
 ## Fibroblasts
@@ -116,9 +137,22 @@ ZT_full = (Rep-1)*24+ZT
 fibro_pb_cycling = is_cycling(ZT_full, pb_mat)
 fibro_var_cycling = var_cycling(ZT_full, var_mat, pb_mat)
 
-fibro_phi = Orpheus::calc_phi(ZT_full, pb_cycling_results = fibro_pb_cycling, var_cycling_results = fibro_var_cycling)
 
-Orpheus::plot_rhythms(ZT_full, var_mat = var_mat, mean_mat = pb_mat, plot_me = c("Dusp1"))
+fibro_JTK = var_cycling_JTK(ZT_full, var_mat, pb_mat, out_file_circ = "input_12hr.txt", out_file_mean = "input_24hr.txt", out_file_pb = "input_pb.txt",out_dir = "output/")
+
+fibro_doub_cyclers_JTK = fibro_JTK[[1]]
+fibro_fund_cycling_JTK = fibro_JTK[[2]]
+fibro_pb_cyclers_JTK = fibro_JTK[[3]] %>% mutate(acrophase_bulk = acrophase_bulk*pi/12)
+
+fibro_var_cycling_JTK = merge(fibro_doub_cyclers_JTK, fibro_fund_cycling_JTK , by = "Gene_Symbols", all = TRUE) %>% mutate(double_freq_acrophase =double_freq_acrophase*pi/12 ) %>% mutate(fund_acro = fund_acro *pi/12)
+
+
+fibro_phi = Orpheus::calc_phi(ZT_full, pb_cycling_results = fibro_pb_cycling, var_cycling_results = fibro_var_cycling, var_p_thr = 1, expected_acrodiff_thr = 1)
+
+fibro_phi_JTK = Orpheus::calc_phi(ZT_full, pb_cycling_results = fibro_pb_cyclers_JTK, var_cycling_results = fibro_var_cycling_JTK, var_p_thr = .1, expected_acrodiff_thr = 3/12*pi)
+
+hist(fibro_phi_JTK$phi)
+# Orpheus::plot_rhythms(ZT_full, var_mat = var_mat, mean_mat = pb_mat, plot_me = c("Dusp1"))
 ```
 
 ## Comparison

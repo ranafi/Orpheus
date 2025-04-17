@@ -9,6 +9,7 @@ calc_phi(
   pb_cycling_results,
   var_cycling_results,
   cycling_p_thr = 0.05,
+  var_p_thr = 1,
   expected_acrodiff_thr = 0.524,
   bulk_amp_thr = 0.5
 )
@@ -22,12 +23,14 @@ calc_phi(
 
 \item{cycling_p_thr}{A numeric threshold for cycling p-values to filter significant genes. Default is 0.05.}
 
+\item{var_p_thr}{A numeric threshold for double frequency p-values to filter significant genes. Default is 1 (no filter).}
+
 \item{expected_acrodiff_thr}{A numeric threshold for the expected acrophase difference. Default is 0.524.}
 
 \item{bulk_amp_thr}{A numeric threshold for the bulk amplitude. Default is 0.5.}
 }
 \value{
-A data frame summarizing the phi parameters (G, Ac, and phi) for rhythmic genes.
+A data frame summarizing the phi parameters (G, Ac, and phi) for rhythmic genes, or an empty data frame if no genes meet the criteria.
 }
 \description{
 This function calculates the phi parameter for rhythmic genes by combining results from pseudobulk cycling and double-frequency variance cycling.

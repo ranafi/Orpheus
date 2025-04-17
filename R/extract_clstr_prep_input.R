@@ -30,12 +30,12 @@ extract_clstr_prep_input = function(seurat_obj, cluster_id, assay = "RNA", top_n
     min_cts_lim = exp(mean(log(cluster$nCount_RNA)) - 2*sd(log(cluster$nCount_RNA)))
     # Subset the Seurat object
     cluster <- subset(cluster, subset = nCount_RNA > min_cts_lim & nCount_RNA < max_cts_lim)
-    
+    print(paste0("Removing cells with counts < ", min_cts_lim, " or > ", max_cts_lim))
 
     cluster = NormalizeData(cluster, normalization.method = "RC", scale.factor = mean(cluster$nCount_RNA))
     
     # Get all data layers
-    layers <- Layers(cluster[[assay]], search = "^data.*")
+    layers <- Layers(cluster[[assay]], search = "data")
     # Extract normalized counts for each layer
     norm_counts_list <- lapply(layers, function(layer) {
     GetAssayData(cluster[[assay]], layer = layer)
