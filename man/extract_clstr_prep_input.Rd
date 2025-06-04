@@ -9,7 +9,8 @@ extract_clstr_prep_input(
   cluster_id,
   assay = "RNA",
   top_n_genes = 10000,
-  cells_threshold = 10
+  cells_threshold = 10,
+  clip_sd = 2
 )
 }
 \arguments{

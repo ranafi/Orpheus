@@ -65,3 +65,30 @@ test_that("var_cycling calculates correct cycling params", {
 
 
 })
+
+#Commented out because it generates files
+# test_that("metacycle code is runnable", {
+#   x = seq(0,22, by = 2) #hrs 0-22 by 2
+#   pb1 = 4*cos(pi/12*x-pi)+50 #bulk rhythm1, amp 4, mesor 6, acrophase 12hrs
+#   pb2 = 3*cos(pi/12*x-pi/3)+50 #bulk rhythm2, amp 3, mesor 7, acrophase 4hrs
+
+#   var1 = 3*cos(2*((pi/12)*x-pi/2-pi))+pb1 #double frq rhythm1, acro 6hrs, amp 3
+#   var2 = cos(2*((pi/12)*x-pi/2-pi/3))+pb2 #double frq rhythm2, acro 10hrs, amp 1
+
+#   pb_mat = rbind(pb1, pb2)
+#   var_mat = rbind(var1, var2)
+
+#   plot(x, var1)
+#   plot(x, var2)
+#   circ_temp = tempfile(fileext = ".txt")
+#   mean_temp = tempfile(fileext = ".txt")
+#   pb_temp = tempfile(fileext = ".txt")
+#   dir = tempdir()
+#   res = cycling_meta2d(x, var_mat, pb_mat, out_file_circ = circ_temp,
+#                      out_file_mean = mean_temp, 
+#                      out_file_pb = pb_temp,
+#                      out_dir = dir )
+#   expect_type(res, "list")
+#   expect_length(res, 3)
+
+# })

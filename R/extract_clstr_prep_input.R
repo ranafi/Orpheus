@@ -22,12 +22,12 @@
 #' @importFrom rlang is_empty
 #' @importFrom Matrix rowMeans
 #' @export
-extract_clstr_prep_input = function(seurat_obj, cluster_id, assay = "RNA", top_n_genes = 10000, cells_threshold = 10){
+extract_clstr_prep_input = function(seurat_obj, cluster_id, assay = "RNA", top_n_genes = 10000, cells_threshold = 10, clip_sd = 2){
     cluster = subset(seurat_obj, subset = seurat_clusters == cluster_id)
 
     #filter out cells with log(cts) >10, and < 8
-    max_cts_lim = exp(mean(log(cluster$nCount_RNA)) + 2*sd(log(cluster$nCount_RNA)))
-    min_cts_lim = exp(mean(log(cluster$nCount_RNA)) - 2*sd(log(cluster$nCount_RNA)))
+    max_cts_lim = exp(mean(log(cluster$nCount_RNA)) + clip_sd*sd(log(cluster$nCount_RNA)))
+    min_cts_lim = exp(mean(log(cluster$nCount_RNA)) - clip_sd*sd(log(cluster$nCount_RNA)))
     # Subset the Seurat object
     cluster <- subset(cluster, subset = nCount_RNA > min_cts_lim & nCount_RNA < max_cts_lim)
     print(paste0("Removing cells with counts < ", min_cts_lim, " or > ", max_cts_lim))

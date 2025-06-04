@@ -137,6 +137,60 @@ ZT_full = (Rep-1)*24+ZT
 fibro_pb_cycling = is_cycling(ZT_full, pb_mat)
 fibro_var_cycling = var_cycling(ZT_full, var_mat, pb_mat)
 
+######### 
+
+expected_acrodiff_thr = 0.524
+input = fibro_var_cycling %>% 
+     left_join(fibro_pb_cycling, by = "Gene_Symbols") %>%
+     mutate(across(-Gene_Symbols, as.numeric)) %>%
+     filter(p_statistic < 0.05) %>%
+     mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+     mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+     filter(keep_acrodiff == TRUE) %>%
+     dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
+     column_to_rownames("Gene_Symbols")%>%
+     filter( amplitude_bulk > 0.5) %>%
+     #select(c(1:5)) %>%
+     filter(partial_model_AIC > full_model_AIC)
+
+hist(input$acrodiff)
+  # Calculate phi parameters
+phi = input %>%
+  apply(., 1, function(row) {
+    Orpheus::find_analytic(row[1], row[2], row[3])
+  }) %>%
+  t %>%
+  as.data.frame
+colnames(phi) = c("G_pred", "Ac_pred", "phi")
+
+plot_df = merge(input, phi, by = 0) 
+
+# Prepare data for the line
+x_line_values <- seq(0, 2, by = 0.1)
+y_line_values <- x_line_values * (90 * x_line_values - 1) / 180
+line_data <- data.frame(x = x_line_values, y = y_line_values)
+
+# Create the ggplot
+ggplot() +
+  geom_point(
+    data = plot_df,
+    aes(x = fund_amp, y = double_freq_amplitude,
+        shape = (amplitude_bulk < 0.5))
+  ) +
+  geom_line(
+    data = line_data,
+    aes(x = x, y = y),
+    color = "blue", # Optional: make the line a different color
+    linewidth = 1    # Optional: make the line a bit thicker
+  ) +
+  coord_cartesian() +
+  labs(
+    x = "Fundamental Amplitude (input$fund_amp)",
+    y = "Double Frequency Amplitude (input$double_freq_amplitude)"
+  ) +
+  theme_minimal()
+
+###########
 
 fibro_JTK = var_cycling_JTK(ZT_full, var_mat, pb_mat, out_file_circ = "input_12hr.txt", out_file_mean = "input_24hr.txt", out_file_pb = "input_pb.txt",out_dir = "output/")
 
