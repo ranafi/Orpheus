@@ -32,7 +32,7 @@ extract_clstr_prep_input = function(seurat_obj, cluster_id, assay = "RNA", top_n
     cluster <- subset(cluster, subset = nCount_RNA > min_cts_lim & nCount_RNA < max_cts_lim)
     print(paste0("Removing cells with counts < ", min_cts_lim, " or > ", max_cts_lim))
 
-    cluster = NormalizeData(cluster, normalization.method = "RC", scale.factor = mean(cluster$nCount_RNA))
+    cluster = NormalizeData(cluster, assay = assay, normalization.method = "RC", scale.factor = mean(cluster$nCount_RNA))
     
     # Get all data layers
     layers <- Layers(cluster[[assay]], search = "data")
