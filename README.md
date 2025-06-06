@@ -29,20 +29,22 @@ The tool is designed for use with circadian gene expression data, and is suited 
 
 To install Orpheus, clone this repository and install the package.
 
-library(orpheus)
-results <- estimate_phase_dispersion(input_data)
+See examples directory for help running Orpheus
 
 📊 Features
+
 Estimates phase dispersion using Method of Moments
 
-Designed for single-cell circadian datasets
+Designed for single-cell circadian datasets with timecourse collection
 
-Modular and extensible
+Modular
 
 Clean, interpretable output for downstream analysis
 
 📁 Example Data
+
 Example datasets and demo notebooks are available in the examples/ directory.
 
 🤝 Contributing
+
 We welcome contributions! Please check the issues tab or open a pull request.
