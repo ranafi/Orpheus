@@ -7,3 +7,4 @@ examples/.DS_Store
 R/.Rhistory
 R/.DS_Store
 R/output/*
+R/input*

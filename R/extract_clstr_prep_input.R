@@ -8,7 +8,7 @@
 #' @param assay The assay to use (default is "RNA").
 #' @param top_n_genes The number of top genes to retain based on mean expression (default is 10000).
 #' @param cells_threshold The minimum number of cells required per individual (default is 10).
-#'
+#' @param clip_sd The number of standard deviations to use for clipping cells based on counts (default is 2).
 #' @return A list containing pseudobulk normalized counts and variance matrices.
 #'
 #' @examples

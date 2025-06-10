@@ -23,6 +23,8 @@ extract_clstr_prep_input(
 \item{top_n_genes}{The number of top genes to retain based on mean expression (default is 10000).}
 
 \item{cells_threshold}{The minimum number of cells required per individual (default is 10).}
+
+\item{clip_sd}{The number of standard deviations to use for clipping cells based on counts (default is 2).}
 }
 \value{
 A list containing pseudobulk normalized counts and variance matrices.

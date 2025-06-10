@@ -66,6 +66,29 @@ test_that("var_cycling calculates correct cycling params", {
 
 })
 
+test_that("var_cycling_fix_acro calculates correct cycling params", {
+  x = seq(0,22, by = 2) #hrs 0-22 by 2
+  pb1 = 4*cos(pi/12*x-pi)+50 #bulk rhythm1, amp 4, mesor 6, acrophase 12hrs
+  pb2 = 3*cos(pi/12*x-pi/3)+50 #bulk rhythm2, amp 3, mesor 7, acrophase 4hrs
+
+  var1 = 3*cos(2*((pi/12)*x-pi/2-pi))+pb1 #double frq rhythm1, acro 6hrs, amp 3
+  var2 = cos(2*((pi/12)*x-pi/2-pi/3))+pb2 #double frq rhythm2, acro 10hrs, amp 1
+
+  pb_mat = rbind(pb1, pb2)
+  var_mat = rbind(var1, var2)
+
+  plot(x, var1)
+  plot(x, var2)
+
+  res = var_cycling_fix_acro(x, var_mat, pb_mat, c(pi, 4*pi/12))
+
+  expect_length(res, 9)
+  expect_equal(as.numeric(res$double_freq_amplitude), c(3, 1), tolerance = 1e-6)  
+  expect_equal(as.numeric(res$fund_amp), c(4, 3), tolerance = 1e-6)  
+
+})
+
+
 #Commented out because it generates files
 # test_that("metacycle code is runnable", {
 #   x = seq(0,22, by = 2) #hrs 0-22 by 2
