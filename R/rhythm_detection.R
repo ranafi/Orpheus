@@ -32,6 +32,13 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
   #loop:
   all_genes = foreach (gene_i = 1:ncol(gene1), .combine = rbind) %do%{
     gexp1 = as.numeric(unlist(gene1[,gene_i]))
+    Gene_Symbols = colnames(gene1)[gene_i]
+
+      # Check for all zeros or zero variance
+    if (all(gexp1 == 0) || sd(gexp1) == 0) {
+      # Return NA row for this gene
+      return(c(Gene_Symbols, rep(NA, 7))) # 9 columns to match the number of outputs
+    }
     
     partial_model = lm(gexp1 ~ 1)
     full_model = lm(gexp1 ~ sin(times1) + cos(times1) )
@@ -43,7 +50,6 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
     acrophase_bulk = atan2(sin_coff, cos_coeff) %% (2*pi)
     
     p_statistic = anova_results$`Pr(>F)`[2]
-    Gene_Symbols = colnames(gene1)[gene_i]
     amplitude_bulk = sqrt(sin_coff^2 + cos_coeff^2)
     
     mesor_bulk = full_model$coefficients[["(Intercept)"]]
@@ -92,6 +98,13 @@ var_cycling <- function(times, var_mat, mean_mat, time_units = "hrs") {
   all_genes = foreach (gene_i = 1:ncol(gene1), .combine = rbind) %do%{
     gexp1 = as.numeric(unlist(gene1[,gene_i]))
     m1 = as.numeric(unlist(means1[, gene_i]))
+    Gene_Symbols = colnames(gene1)[gene_i]
+
+    # Check for all zeros or zero variance
+    if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
+      # Return NA row for this gene
+      return(c(Gene_Symbols, rep(NA, 8))) # 9 columns to match the number of outputs
+    }
     
     partial_model = lm(gexp1 ~ m1)
     partial_model_AIC = AIC(partial_model)
@@ -111,7 +124,6 @@ var_cycling <- function(times, var_mat, mean_mat, time_units = "hrs") {
     
     
     double_freq_p_statistic = anova_results$`Pr(>F)`[2]
-    Gene_Symbols = colnames(gene1)[gene_i]
     double_freq_amplitude = sqrt(sin_coff^2 + cos_coeff^2)
     
     #MESOR or mean of the fitted variance wave
@@ -161,6 +173,14 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
     gexp1 = as.numeric(unlist(gene1[,gene_i]))
     m1 = as.numeric(unlist(means1[, gene_i]))
     phase_bulk = as.numeric(phase_pb[gene_i])
+    Gene_Symbols = colnames(gene1)[gene_i]
+
+    # Check for all zeros or zero variance
+    if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
+      # Return NA row for this gene
+      return(c(Gene_Symbols, rep(NA, 6))) # 9 columns to match the number of outputs
+    }
+
 
     partial_model = lm(gexp1 ~ m1)
     partial_model_AIC = AIC(partial_model)
@@ -175,7 +195,7 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
 
     anova_results = anova(partial_model, full_model)
     double_freq_p_statistic = anova_results$`Pr(>F)`[2]
-    Gene_Symbols = colnames(gene1)[gene_i]
+    
 
     #Amplitude of the double frequency component
     double_freq_amplitude = full_model$coefficients[["double_wave"]]
@@ -372,7 +392,7 @@ cycling_meta2d <- function(times, var_mat, mean_mat,
   foreach(gene_i = 1:ncol(gene1), .combine = rbind) %do% {
     gexp1 <- as.numeric(unlist(gene1[, gene_i]))
     m1 <- as.numeric(unlist(means1[, gene_i]))
-    
+
     # Fit the variance model
     var_model <- lm(gexp1 ~ sin(2 * (pi/12)*times1) + cos(2 * (pi/12)*times1) + m1)
     design_matrix <- model.matrix(gexp1 ~ sin(2 * (pi/12)*times1) + cos(2 * (pi/12)*times1) + m1)
