@@ -7,11 +7,19 @@
 #' @param Af Fundamental frequency of variance amplitude.
 #' @return A numeric vector containing G (Mesor), Ac (Cell rhythm amplitude), and p (phase shift_standard_dev).
 #' @export
-find_analytic = function(Av, Mv, Af){
-  G = (-Af^2*Av+Af^2*Mv-2*Av*Mv)/(Af^2-2*Av)
-  Ac = (Af^2/sqrt((Af^2-2*Av)))
-  p = (sqrt(2)* sqrt( log( Af/sqrt((Af^2-2*Av)) ) ))
-  return(c(G, Ac, p))
+# find_analytic = function(Av, Mv, Af){
+#   G = (-Af^2*Av+Af^2*Mv-2*Av*Mv)/(Af^2-2*Av)
+#   Ac = (Af^2/sqrt((Af^2-2*Av)))
+#   p = (sqrt(2)* sqrt( log( Af/sqrt((Af^2-2*Av)) ) ))
+#   return(c(G, Ac, p))
+# }
+find_analytic = function(Av, Mv, Ab, Mb){
+  G = Mb
+  R = Av/(Ab^2)
+  phi = sqrt(-log(1-2*R)) #Equivalent to how I got phi before...
+  Ac = Ab/sqrt(1-2*R)
+  #epsilon = sqrt(Mv - Mb - (Av/(1-2*R)))
+  return(c(G, Ac, phi))
 }
 
 #' Calculate Phi for Rhythmic Genes
@@ -47,15 +55,17 @@ calc_phi = function(ZT, pb_cycling_results, var_cycling_results, cycling_p_thr =
         unlist
     print(paste("Number of cycling genes: ", length(circ_genes)))
 
-    # Merge cycling and var_cycling results
     input = var_cycling_results %>% 
         left_join(pb_cycling_results, by = "Gene_Symbols") %>%
         mutate(across(-Gene_Symbols, as.numeric)) %>%
-        filter(p_statistic < cycling_p_thr & double_freq_p_statistic < var_p_thr) %>%
+        filter(p_statistic < cycling_p_thr) %>%
         mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-        mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr))
+        mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+        dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,amplitude_bulk, mesor_bulk, fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
+        column_to_rownames("Gene_Symbols")%>%
+        filter(partial_model_AIC > full_model_AIC)
 
-    hist(input$acrodiff, main = "Acrophase difference histogram", xlab = "Acrophase difference (radians)")
+    # hist(input$acrodiff, main = "Acrophase difference histogram", xlab = "Acrophase difference (radians)")
     # Check if input is empty after filtering
     if (nrow(input) == 0) {
         warning("Warning: No genes meet the filtering criteria. Returning an empty data frame.")
@@ -64,24 +74,24 @@ calc_phi = function(ZT, pb_cycling_results, var_cycling_results, cycling_p_thr =
 
     print(paste("Number of genes with acrophase difference within expected range:", nrow(filter(input, keep_acrodiff == TRUE))))
 
-    input = input %>%
-        filter(keep_acrodiff == TRUE) %>%
-        dplyr::select(Gene_Symbols, double_freq_amplitude, var_mesor, fund_amp, everything()) %>%
-        column_to_rownames("Gene_Symbols")
+    # input = input %>%
+    #     filter(keep_acrodiff == TRUE) %>%
+    #     dplyr::select(Gene_Symbols, double_freq_amplitude, var_mesor, fund_amp, everything()) %>%
+    #     column_to_rownames("Gene_Symbols")
 
     # Check if input is empty after filtering for PB amplitude
-    if (nrow(filter(input, amplitude_bulk > bulk_amp_thr)) == 0) {
+    if (nrow(filter(input, amplitude_bulk >= bulk_amp_thr)) == 0) {
         warning("Warning: No genes have PB amplitude greater than the threshold. Returning an empty data frame.")
         return(data.frame(G = numeric(0), Ac = numeric(0), phi = numeric(0)))
     }
 
-    print(paste("Number of genes with PB amplitude >", bulk_amp_thr, ":", nrow(filter(input, amplitude_bulk > bulk_amp_thr))))
+    print(paste("Number of genes with PB amplitude >", bulk_amp_thr, ":", nrow(filter(input, amplitude_bulk >= bulk_amp_thr))))
 
     # Calculate phi parameters
     phi = input %>%
-        filter(amplitude_bulk > bulk_amp_thr) %>%
+        filter(amplitude_bulk >= bulk_amp_thr) %>%
         apply(., 1, function(row) {
-            Orpheus::find_analytic(row[1], row[2], row[3])
+            Orpheus::find_analytic(row[1], row[2], row[3], row[4])
         }) %>%
         t %>%
         as.data.frame
