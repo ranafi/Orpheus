@@ -105,8 +105,10 @@ simulate_scRNAseq_circadian <- function(n = 10000, m = 5000, p_circ = 0.1,n_time
 }
 
 phi_sd = 0.3
+# sim <- simulate_scRNAseq_circadian(n = 1000, m = 5000, p_circ = .1, phi_sd = phi_sd,
+#                                    A_range = c(0.1, 2), G_range = c(0.1, 2))
 sim <- simulate_scRNAseq_circadian(n = 1000, m = 5000, p_circ = .1, phi_sd = phi_sd,
-                                   A_range = c(.1, 2), G_range = c(0.1, 2))
+                                   A_range = c(2, 5), G_range = c(2, 5))
 counts <- sim$counts
 metadata <- sim$cell_metadata
 gene_info <- sim$gene_parameters
@@ -141,7 +143,7 @@ var_cyclers = var_cycling(ZT, var_mat[1:5000,], pb_mat[1:5000,], time_units = "r
 # phi = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers, var_p_thr = .3, expected_acrodiff_thr = .5)
 # hist(phi$phi)
 
-expected_acrodiff_thr = 0.524
+expected_acrodiff_thr = 3*pi/12
 
 input = var_cyclers %>% 
   left_join(pb_cycling, by = "Gene_Symbols") %>%
@@ -149,10 +151,10 @@ input = var_cyclers %>%
   filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
   mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
   mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
-  filter(keep_acrodiff == TRUE) %>%
+  # filter(keep_acrodiff == TRUE) %>%
   dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
   column_to_rownames("Gene_Symbols")%>%
-  # filter( amplitude_bulk > 0.5) %>%
+  filter( fund_amp > 1) %>%
   # select(c(1:5)) %>%
   filter(partial_model_AIC > full_model_AIC)
 

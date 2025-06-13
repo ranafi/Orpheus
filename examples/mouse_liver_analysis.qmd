@@ -48,7 +48,7 @@ var_mat = tmp[[2]]
 matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
 ZT = as.numeric(matches[,2])
 
-if(length(unique(diff(ZT))) != 1){
+if(length(unique(diff(ZT))) != 1 || length(unique(ZT)) < 6){
   print("Cell does not have time points suitable for analysis")
   next
 }
@@ -102,7 +102,7 @@ input_meta2d = var_cycling_meta2d_res %>%
   filter(fund_amp > 1)%>%
   column_to_rownames("Gene_Symbols")
 
-hist(input_meta2d$acrodiff, main = "Meta2d acrodiff")
+#hist(input_meta2d$acrodiff, main = "Meta2d acrodiff")
  
 phi_meta2d = input_meta2d %>%
   apply(., 1, function(row) {
@@ -114,6 +114,7 @@ colnames(phi_meta2d) = c("G_pred", "Ac_pred", "phi")
 print(paste0("meta2d: ", sum(!is.nan(phi_meta2d$phi)), "/",nrow(input_meta2d), " phi's not nan"  ))
 
 print(paste0("meta2d: ", sum(input_meta2d$keep_acrodiff), "/",nrow(input_meta2d), " have double freq acro within 0.785 rads of pi/2"  ))
+output_meta2d = merge(phi_meta2d, input_meta2d, by = 0)
 
 #### cosinor results 1 ###
 # phi = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers, var_p_thr = 1, expected_acrodiff_thr = 1, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
@@ -141,6 +142,8 @@ phi_cos = input_cos %>%
 colnames(phi_cos) = c("G_pred", "Ac_pred", "phi")
 print(paste0("cosinor: ", sum(!is.nan(phi_cos$phi)), "/",nrow(input_cos), " phi's not nan"  ))
 print(paste0("cosinor: ", sum(input_cos$keep_acrodiff), "/",nrow(input_cos), " have double freq acro within 0.785 rads of pi/2"  ))
+
+output_cos = merge(phi_cos, input_cos, by = 0)
 
 
 # plot_df = merge(input, phi, by = 0) 
@@ -188,6 +191,9 @@ phi_cos_fix = input_cos_fix %>%
   as.data.frame
 colnames(phi_cos_fix) = c("G_pred", "Ac_pred", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix$phi)), "/",nrow(input_cos_fix), " phi's not nan"  ))
+
+output_cos_fix = merge(phi_cos_fix, input_cos_fix, by = 0)
+
 # plot_df = merge(input, phi, by = 0) 
 # # Prepare data for the line
 # x_line_values <- seq(0, 150, by = 0.1)
@@ -213,9 +219,39 @@ print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix$phi)), "/",nrow(inp
 #     y = "Double Frequency Amplitude (input$double_freq_amplitude)"
 #   ) +
 #   theme_minimal()+ylim(0, 10)+xlim(0, 20)
- local_res =  list("cos" = phi_cos, "fix" = phi_cos_fix, "meta2d" = phi_meta2d)
+ local_res =  list("cos" = output_cos, "fix" = output_cos_fix, "meta2d" = output_meta2d)
  names(local_res) = paste(cell_type, names(local_res))
  cluster_phis <- append(cluster_phis, list(local_res))
 
 }
+```
+
+```{r}
+cos_phis <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+cos_fixed_phis <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[2]]
+  current_df$Source <- names(cluster_phis[[source_name]][2])
+  current_df
+}))
+
+meta2d_phis <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[3]]
+  current_df$Source <- names(cluster_phis[[source_name]][3])
+  current_df
+}))
+
+
+cos_phis_filt = filter(cos_phis, keep_acrodiff == T & !is.nan(phi))
+table(cos_phis_filt$Source)
+
+cos_fixed_phis = filter(cos_fixed_phis, !is.nan(phi))
+table(cos_fixed_phis$Source)
+
+meta2d_phis_filt = filter(meta2d_phis, keep_acrodiff == T & !is.nan(phi))
+table(meta2d_phis_filt$Source)
 ```
