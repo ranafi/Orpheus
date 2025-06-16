@@ -94,19 +94,19 @@ var_cycling_meta2d_res = merge(doub_cyclers_meta2d, fund_cycling_meta2d , by = "
 expected_acrodiff_thr = 0.785
 input_meta2d = var_cycling_meta2d_res %>%
   left_join(pb_cycling, by = "Gene_Symbols") %>%
-  mutate(across(-Gene_Symbols, as.numeric)) %>%
-  filter(p_statistic < 0.05 & double_freq_p_statistic < 0.05) %>%
-  mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-   mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
-  dplyr::select(Gene_Symbols, fund_amp,var_mesor,double_freq_amplitude , everything()) %>%
-  filter(fund_amp > 1)%>%
-  column_to_rownames("Gene_Symbols")
+     mutate(across(-Gene_Symbols, as.numeric)) %>%
+     filter(p_statistic < 0.05) %>%
+     mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+     mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+     dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,amplitude_bulk, mesor_bulk, fund_amp,  everything()) %>%
+     filter(amplitude_bulk >= 0.5) %>%
+     column_to_rownames("Gene_Symbols")
 
 #hist(input_meta2d$acrodiff, main = "Meta2d acrodiff")
  
 phi_meta2d = input_meta2d %>%
   apply(., 1, function(row) {
-    Orpheus::find_analytic(row[1], row[2], row[3])
+    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
   }) %>%
   t %>%
   as.data.frame
@@ -125,8 +125,8 @@ input_cos = var_cyclers %>%
      filter(p_statistic < 0.05) %>%
      mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
      mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
-     dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
-     filter(fund_amp > 1) %>%
+     dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,amplitude_bulk, mesor_bulk, fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
+     filter(amplitude_bulk >= 0.5) %>%
      column_to_rownames("Gene_Symbols")%>%
      filter(partial_model_AIC > full_model_AIC)
 
@@ -135,7 +135,7 @@ hist(input_cos$acrodiff)
   # Calculate phi parameters
 phi_cos = input_cos %>%
   apply(., 1, function(row) {
-    Orpheus::find_analytic(row[1], row[2], row[3])
+    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
   }) %>%
   t %>%
   as.data.frame
@@ -175,17 +175,17 @@ output_cos = merge(phi_cos, input_cos, by = 0)
 #### cosinor results  2 (fixed acrophase) ###
 input_cos_fix = var_cyclers_fixed %>% 
      left_join(pb_cycling, by = "Gene_Symbols") %>%
-     mutate(across(-Gene_Symbols, as.numeric)) %>%
-     filter(p_statistic < 0.05) %>%
-     dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
-     filter(fund_amp > 1 & double_freq_amplitude > 0) %>%
-     column_to_rownames("Gene_Symbols")%>%
-     filter(partial_model_AIC > full_model_AIC)
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,amplitude_bulk, mesor_bulk, fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC > full_model_AIC)
 
   # Calculate phi parameters
 phi_cos_fix = input_cos_fix %>%
   apply(., 1, function(row) {
-    Orpheus::find_analytic(row[1], row[2], row[3])
+    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
   }) %>%
   t %>%
   as.data.frame

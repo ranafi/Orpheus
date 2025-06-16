@@ -154,7 +154,7 @@ input = var_cyclers %>%
   # filter(keep_acrodiff == TRUE) %>%
   dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,fund_amp, partial_model_AIC, full_model_AIC, amplitude_bulk,mesor_bulk,  everything()) %>%
   column_to_rownames("Gene_Symbols")%>%
-  filter( fund_amp > 1) %>%
+  filter( amplitude_bulk >= 0.5) %>%
   # select(c(1:5)) %>%
   filter(partial_model_AIC > full_model_AIC)
 
@@ -174,6 +174,8 @@ phi2 = input %>%
   t %>%
   as.data.frame
 colnames(phi2) = c("G_pred", "Ac_pred", "phi_pred", "epsilon_pred")
+
+phi = calc_phi(ZT, pb_cycling, var_cyclers, )
 
 plot_df = merge(input, phi2, by = 0) %>%
   merge(., gene_info, by.x="Row.names", by.y = 0)%>%

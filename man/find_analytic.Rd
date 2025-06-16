@@ -4,7 +4,7 @@
 \alias{find_analytic}
 \title{Calculate Analytic Parameters}
 \usage{
-find_analytic(Av, Mv, Af)
+find_analytic(Av, Mv, Ab, Mb)
 }
 \arguments{
 \item{Av}{Double frequency variance amplitude.}

@@ -2,13 +2,14 @@
 test_that("find_analytic calculates correct values", {
   Av <- 0.5
   Mv <- 2.0
-  Af <- 2.0
+  Ab <- 2.0
+  Mb <- 3.0
   
-  result <- find_analytic(Av, Mv, Af)
+  result <- find_analytic(Av, Mv, Ab, Mb)
   
   expect_length(result, 3)  # Check that the result has 3 elements
   expect_true(all(is.numeric(result)))  # Check that all elements are numeric
-  expect_equal(result[1], 1.333333, tolerance = 1e-6)  # Check the first element (G)
+  expect_equal(result[1], 3, tolerance = 1e-6)  # Check the first element (G)
   expect_equal(result[2], 2.309401, tolerance = 1e-6)  # Check the second element (Ac)
   expect_equal(result[3], 0.536360, tolerance = 1e-6)  # Check the third element (p)
 })
