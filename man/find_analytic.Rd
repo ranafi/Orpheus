@@ -4,14 +4,16 @@
 \alias{find_analytic}
 \title{Calculate Analytic Parameters}
 \usage{
-find_analytic(Av, Mv, Ab, Mb)
+find_analytic(V_2w, V_w, S_amp, S_DC)
 }
 \arguments{
-\item{Av}{Double frequency variance amplitude.}
+\item{V_2w}{Double frequency variance amplitude.}
 
-\item{Mv}{Fundamental frequency of variance mesor.}
+\item{V_w}{Fundamental frequency of variance amplitude.}
 
-\item{Af}{Fundamental frequency of variance amplitude.}
+\item{S_amp}{pseudobulk cycling amplitude.}
+
+\item{S_DC}{Mesor of the pseudobulk cycling.}
 }
 \value{
 A numeric vector containing G (Mesor), Ac (Cell rhythm amplitude), and p (phase shift_standard_dev).

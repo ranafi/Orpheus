@@ -1,17 +1,17 @@
 
 test_that("find_analytic calculates correct values", {
   Av <- 0.5
-  Mv <- 2.0
+  Af <- 2.0
   Ab <- 2.0
   Mb <- 3.0
   
-  result <- find_analytic(Av, Mv, Ab, Mb)
+  result <- find_analytic(Av, Af, Ab, Mb)
   
-  expect_length(result, 3)  # Check that the result has 3 elements
+  expect_length(result, 4)  # Check that the result has 3 elements
   expect_true(all(is.numeric(result)))  # Check that all elements are numeric
   expect_equal(result[1], 3, tolerance = 1e-6)  # Check the first element (G)
   expect_equal(result[2], 2.309401, tolerance = 1e-6)  # Check the second element (Ac)
-  expect_equal(result[3], 0.536360, tolerance = 1e-6)  # Check the third element (p)
+  expect_equal(result[4], 0.536360, tolerance = 1e-6)  # Check the third element (p)
 })
 
 
@@ -57,7 +57,7 @@ test_that("var_cycling calculates correct cycling params", {
     var_mat = rbind(var1, var2)
 
 
-    res = var_cycling(x, var_mat, pb_mat, time_units = "rad")
+    res = var_cycling(x, var_mat, pb_mat, c(pi, pi/3), time_units = "rad")
 
     expect_equal(as.numeric(res$double_freq_acrophase), c(pi/2, 2.61799387), tolerance = 1e-6)  
     expect_equal(as.numeric(res$double_freq_amplitude), c(3, 1))  

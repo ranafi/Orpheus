@@ -4,7 +4,7 @@
 \alias{var_cycling}
 \title{Detect Double-Frequency Rhythms in Variance Data}
 \usage{
-var_cycling(times, var_mat, mean_mat, time_units = "hrs")
+var_cycling(times, var_mat, mean_mat, phase_pb, time_units = "hrs")
 }
 \arguments{
 \item{times}{A numeric vector of time points (e.g., ZT times).}
@@ -12,6 +12,8 @@ var_cycling(times, var_mat, mean_mat, time_units = "hrs")
 \item{var_mat}{A matrix of variance data (genes x samples).}
 
 \item{mean_mat}{A matrix of mean expression data (genes x samples).}
+
+\item{phase_pb}{A numeric vector of pseudobulk acrophases (in radians) for each gene, typically obtained from `is_cycling()`.}
 
 \item{time_units}{A string indicating the time units ("hrs" for hours or "radians" for radians). Default is "hrs".}
 }

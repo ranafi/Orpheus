@@ -46,8 +46,15 @@ for(cluster_id in unique(seurat_obj$seurat_clusters)){
   ZT = as.numeric(matches[,2])
   
   pb_cycling = is_cycling(ZT, pb_mat)
-  var_cyclers = var_cycling(ZT, var_mat, pb_mat)
   
+  all(pb_cycling$Gene_Symbols == rownames(pb_mat))
+  phase_pb = pb_cycling$acrophase_bulk  %>% unname %>% unlist %>% as.numeric
+
+  #Run cosinor regression on variance data, where phases are fixed.
+  var_cyclers = var_cycling(ZT, var_mat, pb_mat, phase_pb, time_units = "hrs")
+  var_cyclers_fixed = var_cycling_fix_acro(ZT, var_mat, pb_mat, phase_pb)
+
+  plot(-log(as.numeric(var_cyclers_fixed$double_freq_p_statistic)), -log(as.numeric(var_cyclers$double_freq_p_statistic)))
   
   # JTK_res = var_cycling_JTK(ZT, var_mat, pb_mat, out_file_circ = "input_12hr.txt", out_file_mean = "input_24hr.txt", out_file_pb = "input_pb.txt",out_dir = "output/")
   # 
@@ -69,72 +76,135 @@ for(cluster_id in unique(seurat_obj$seurat_clusters)){
 
   #phi = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers, var_p_thr = .2, expected_acrodiff_thr = 3/12*pi, bulk_amp_thr = 0.2)
   
-  phi = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers, var_p_thr = 1, expected_acrodiff_thr = 1, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+  # phi = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers_fixed, var_p_thr = 1, expected_acrodiff_thr = 1, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
   
-  # input = var_cycling_JTK_res %>% 
-  #       left_join(pb_cycling, by = "Gene_Symbols") %>%
-  #       mutate(across(-Gene_Symbols, as.numeric)) %>%
-  #       filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
-  #       mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-  #       mutate(keep_acrodiff = acrodiff < (pi / 2 + 1) & acrodiff > (pi / 2 - 1)) %>%
-  #       filter(keep_acrodiff == TRUE) %>%
-  #       dplyr::select(Gene_Symbols, fund_amp,var_mesor,double_freq_amplitude , everything()) %>%
-  #       column_to_rownames("Gene_Symbols")%>%
-  #   filter( amplitude_bulk > 0.5) %>% select(c(1:3)) %>%rename(Af = fund_amp, Mv = var_mesor, Av = double_freq_amplitude)
-  #       
-  # guess = estimate_single_phi(input[-1,])
-  # estimate_CI(input[-1,], guess[1,3])
-  
-expected_acrodiff_thr = 0.524
-input = var_cyclers %>% 
+ input_cos = var_cyclers %>% 
      left_join(pb_cycling, by = "Gene_Symbols") %>%
-     mutate(across(-Gene_Symbols, as.numeric)) %>%
-     filter(p_statistic < 0.05) %>%
-     mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-     mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
-     #filter(keep_acrodiff == TRUE) %>%
-     dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
-     column_to_rownames("Gene_Symbols")%>%
-     # filter( amplitude_bulk > 0.5) %>%
-     #select(c(1:5)) %>%
-     filter(partial_model_AIC > full_model_AIC)
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.2) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC > full_model_AIC)
 
-hist(input$acrodiff)
   # Calculate phi parameters
-phi = input %>%
+phi_cos = input_cos %>%
   apply(., 1, function(row) {
-    Orpheus::find_analytic(row[1], row[2], row[3])
+    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
   }) %>%
   t %>%
   as.data.frame
-colnames(phi) = c("G_pred", "Ac_pred", "phi")
+colnames(phi_cos) = c("G_pred", "Ac_pred", "theta", "phi")
+print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos$phi)), "/",nrow(input_cos), " phi's not nan"  ))
 
-plot_df = merge(input, phi, by = 0) 
+phi = calc_phi(ZT, pb_cycling, var_cyclers, cycling_p_thr = 0.2, bulk_amp_thr = 0.5)
 
+output_cos = merge(phi_cos, input_cos, by = 0)
+
+
+plot_df = merge(input_cos, phi_cos, by = 0)
+
+theta = 1
 # Prepare data for the line
-x_line_values <- seq(0, 2, by = 0.1)
-y_line_values <- x_line_values * (90 * x_line_values - 1) / 180
-line_data <- data.frame(x = x_line_values, y = y_line_values)
+x_line_values <- seq(0, max(plot_df$amplitude_bulk), by = 0.1)
+# y_line_values <- -x_line_values^2 * (exp(1)^9 - 1 - theta) / (2*exp(1)^9)
+# y_lines_values2 <- -(theta/2)*x_line_values^2
+# y_line_values = -.5*exp(-2^2)*x_line_values^2*(exp(2^2)-theta - 1)
+y_line_lb <- -(theta/2)*x_line_values^2
+y_line_ub <- .5*x_line_values^2
+line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
 
 # Create the ggplot
+library(ggplot2)
 ggplot() +
   geom_point(
     data = plot_df,
-    aes(x = fund_amp, y = double_freq_amplitude,
-        shape = (amplitude_bulk < 0.5))
+    aes(x = amplitude_bulk, y = double_freq_amplitude)
   ) +
   geom_line(
     data = line_data,
-    aes(x = x, y = y),
-    color = "blue", # Optional: make the line a different color
-    linewidth = 1    # Optional: make the line a bit thicker
+    aes(x = x, y = y1),
+    color = "blue", 
+    linewidth = 1   
+  ) +
+  geom_line(
+    data = line_data,
+    aes(x = x, y = y2),
+    color = "blue", 
+    linewidth = 1   
   ) +
   coord_cartesian() +
   labs(
-    x = "Fundamental Amplitude (input$fund_amp)",
+    x = "Amplitude bulk",
     y = "Double Frequency Amplitude (input$double_freq_amplitude)"
   ) +
-  theme_minimal()
+  theme_minimal()+
+  scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
+  
+
+#############
+input_cos_fix = var_cyclers_fixed %>% 
+     left_join(pb_cycling, by = "Gene_Symbols") %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.2) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC > full_model_AIC)
+
+  # Calculate phi parameters
+phi_cos_fix = input_cos_fix %>%
+  apply(., 1, function(row) {
+    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+  }) %>%
+  t %>%
+  as.data.frame
+colnames(phi_cos_fix) = c("G_pred", "Ac_pred", "theta", "phi")
+print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix$phi)), "/",nrow(input_cos_fix), " phi's not nan"  ))
+
+phi = calc_phi(ZT, pb_cycling, var_cyclers_fixed, cycling_p_thr = 0.1, bulk_amp_thr = 0.5)
+
+output_cos_fix = merge(phi_cos_fix, input_cos_fix, by = 0)
+
+
+plot_df = merge(input_cos_fix, phi_cos_fix, by = 0)
+
+theta = 1
+# Prepare data for the line
+x_line_values <- seq(0, max(plot_df$amplitude_bulk), by = 0.1)
+# y_line_values <- -x_line_values^2 * (exp(1)^9 - 1 - theta) / (2*exp(1)^9)
+# y_lines_values2 <- -(theta/2)*x_line_values^2
+# y_line_values = -.5*exp(-2^2)*x_line_values^2*(exp(2^2)-theta - 1)
+y_line_lb <- -(theta/2)*x_line_values^2
+y_line_ub <- .5*x_line_values^2
+line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
+
+# Create the ggplot
+library(ggplot2)
+ggplot() +
+  geom_point(
+    data = plot_df,
+    aes(x = amplitude_bulk, y = double_freq_amplitude)
+  ) +
+  geom_line(
+    data = line_data,
+    aes(x = x, y = y1),
+    color = "blue", 
+    linewidth = 1   
+  ) +
+  geom_line(
+    data = line_data,
+    aes(x = x, y = y2),
+    color = "blue", 
+    linewidth = 1   
+  ) +
+  coord_cartesian() +
+  labs(
+    x = "Amplitude bulk",
+    y = "Double Frequency Amplitude (input$double_freq_amplitude)"
+  ) +
+  theme_minimal()+
+  scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
   
   
   cluster_phis <- append(cluster_phis, list(phi_preds))

@@ -1,11 +1,10 @@
 #' @importFrom foreach foreach `%do%`
 #' @importFrom tibble as_tibble
 #' @importFrom tidyr drop_na
-#' @importFrom stats lm anova p.adjust
+#' @importFrom stats lm anova p.adjust AIC qnorm vcov coef
 #' @importFrom utils write.table
 #' @importFrom MetaCycle meta2d
 #' @importFrom tools file_path_sans_ext
-#' @importFrom stats AIC
 NULL
 
 #' Detect Rhythmic Genes in Pseudobulk Data
@@ -77,11 +76,12 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
 #' @param times A numeric vector of time points (e.g., ZT times).
 #' @param var_mat A matrix of variance data (genes x samples).
 #' @param mean_mat A matrix of mean expression data (genes x samples).
+#' @param phase_pb A numeric vector of pseudobulk acrophases (in radians) for each gene, typically obtained from `is_cycling()`.
 #' @param time_units A string indicating the time units ("hrs" for hours or "radians" for radians). Default is "hrs".
 #' @return A tibble summarizing double-frequency rhythmicity metrics for each gene, including acrophase, amplitude, p-values, and adjusted p-values.
 
 #' @export
-var_cycling <- function(times, var_mat, mean_mat, time_units = "hrs") {
+var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") {
   `%do%` <- foreach::`%do%`
   cat(paste("\nRunning var_cycling()"))
   gene1 = t(var_mat)  # get the transpose, subjects x genes and put in order of CYCLOPS order
@@ -99,6 +99,8 @@ var_cycling <- function(times, var_mat, mean_mat, time_units = "hrs") {
     gexp1 = as.numeric(unlist(gene1[,gene_i]))
     m1 = as.numeric(unlist(means1[, gene_i]))
     Gene_Symbols = colnames(gene1)[gene_i]
+    phase_bulk = as.numeric(phase_pb[gene_i])
+
 
     # Check for all zeros or zero variance
     if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
@@ -124,12 +126,31 @@ var_cycling <- function(times, var_mat, mean_mat, time_units = "hrs") {
     
     
     double_freq_p_statistic = anova_results$`Pr(>F)`[2]
-    double_freq_amplitude = sqrt(sin_coff^2 + cos_coeff^2)
+    raw_2w_amp = sqrt(sin_coff^2 + cos_coeff^2)
+
+    # #Calculate the 95% CI for double frequency phase
+    # if(double_freq_amplitude > 1e-3){
+    #   ## Extract coefficients and covariance ---------------
+    #   b  <- coef(full_model)["cos(2 * times1)"]   # β̂
+    #   g  <- coef(full_model)["sin(2 * times1)"]   # γ̂
+    #   V  <- vcov(full_model)[c("cos(2 * times1)","sin(2 * times1)"),
+    #                   c("cos(2 * times1)","sin(2 * times1)")]
+
+    #   ## SE via delta method -------------------------------
+    #   var.phi <- (g^2*V[1,1] + b^2*V[2,2] - 2*b*g*V[1,2]) / (b^2+g^2)^2
+    #   se.phi  <- sqrt(var.phi)
+    #   ## 95 % CI (in radians) ------------------------------
+    #   phi.hat <- atan2(g, b)
+    #   ci.phi  <- phi.hat + c(-1, 1)*qnorm(0.975)*se.phi
+    # }
     
+    #Amp of double frequency variance wave projected onto expected bulk wave.
+    double_freq_amplitude = -cos_coeff * cos(2 * phase_bulk) - sin_coff * sin(2 * phase_bulk)
+
     #MESOR or mean of the fitted variance wave
     var_mesor = mean( full_model$fitted.values)
 
-    gene_summary = cbind( Gene_Symbols, double_freq_acrophase, double_freq_amplitude, double_freq_p_statistic, fund_amp, fund_acro, var_mesor, partial_model_AIC, full_model_AIC)
+    gene_summary = cbind( Gene_Symbols, double_freq_acrophase, double_freq_amplitude, double_freq_p_statistic, fund_amp, fund_acro, var_mesor, partial_model_AIC, full_model_AIC, raw_2w_amp)
     
     
     

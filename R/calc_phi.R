@@ -2,24 +2,32 @@
 #'
 #' This function calculates analytic parameters (G, Ac, and p) based on input amplitudes and mesor values.
 #'
-#' @param Av Double frequency variance amplitude.
-#' @param Mv Fundamental frequency of variance mesor.
-#' @param Af Fundamental frequency of variance amplitude.
+#' @param V_2w Double frequency variance amplitude.
+#' @param V_w Fundamental frequency of variance amplitude.
+#' @param S_amp pseudobulk cycling amplitude.
+#' @param S_DC Mesor of the pseudobulk cycling.
 #' @return A numeric vector containing G (Mesor), Ac (Cell rhythm amplitude), and p (phase shift_standard_dev).
 #' @export
-# find_analytic = function(Av, Mv, Af){
-#   G = (-Af^2*Av+Af^2*Mv-2*Av*Mv)/(Af^2-2*Av)
-#   Ac = (Af^2/sqrt((Af^2-2*Av)))
-#   p = (sqrt(2)* sqrt( log( Af/sqrt((Af^2-2*Av)) ) ))
-#   return(c(G, Ac, p))
-# }
-find_analytic = function(Av, Mv, Ab, Mb){
-  G = Mb
-  R = Av/(Ab^2)
-  phi = sqrt(-log(1-2*R)) #Equivalent to how I got phi before...
-  Ac = Ab/sqrt(1-2*R)
-  #epsilon = sqrt(Mv - Mb - (Av/(1-2*R)))
-  return(c(G, Ac, phi))
+
+find_analytic = function(V_2w, V_w, S_amp, S_DC){
+  
+  # Solve for G: trivial
+  G = S_DC
+  
+  #solve for Theta (NB dispersion)
+  theta = ((V_w / S_amp) - 1) / (2 * G)
+
+  R = V_2w / S_amp^2
+  log_argument = (1 - 2*R) / (1 + theta)
+  
+  #solve for phi, sd of phase dispersion
+  phi_squared = -log(log_argument)
+  phi = sqrt(phi_squared)
+  
+  # Solve for Ac, amp of cell rhythm
+  Ac = S_amp / exp(-phi_squared / 2) 
+  
+  return(c(G, Ac, theta, phi))
 }
 
 #' Calculate Phi for Rhythmic Genes
@@ -59,9 +67,9 @@ calc_phi = function(ZT, pb_cycling_results, var_cycling_results, cycling_p_thr =
         left_join(pb_cycling_results, by = "Gene_Symbols") %>%
         mutate(across(-Gene_Symbols, as.numeric)) %>%
         filter(p_statistic < cycling_p_thr) %>%
-        mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-        mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
-        dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,amplitude_bulk, mesor_bulk, fund_amp, partial_model_AIC, full_model_AIC,  everything()) %>%
+        # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+        # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+        dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
         column_to_rownames("Gene_Symbols")%>%
         filter(partial_model_AIC > full_model_AIC)
 
@@ -72,7 +80,7 @@ calc_phi = function(ZT, pb_cycling_results, var_cycling_results, cycling_p_thr =
         return(data.frame(G = numeric(0), Ac = numeric(0), phi = numeric(0)))
     }
 
-    print(paste("Number of genes with acrophase difference within expected range:", nrow(filter(input, keep_acrodiff == TRUE))))
+    # print(paste("Number of genes with acrophase difference within expected range:", nrow(filter(input, keep_acrodiff == TRUE))))
 
     # input = input %>%
     #     filter(keep_acrodiff == TRUE) %>%
@@ -96,6 +104,6 @@ calc_phi = function(ZT, pb_cycling_results, var_cycling_results, cycling_p_thr =
         t %>%
         as.data.frame
 
-    colnames(phi) = c("G", "Ac", "phi")
+    colnames(phi) = c("G", "Ac", "theta", "phi")
     return(phi)
 }
