@@ -34,20 +34,17 @@ find_analytic = function(V_2w, V_w, S_amp, S_DC){
 #'
 #' This function calculates the phi parameter for rhythmic genes by combining results from pseudobulk cycling and double-frequency variance cycling.
 #'
-#' @param ZT A numeric vector of time points (e.g., ZT times).
 #' @param pb_cycling_results df of pseudobulk cycling results, as obtained from is_cycling().
 #' @param var_cycling_results df of variance cycling results, as obtained from var_cycling().
 #' @param cycling_p_thr A numeric threshold for cycling p-values to filter significant genes. Default is 0.05.
-#' @param var_p_thr A numeric threshold for double frequency p-values to filter significant genes. Default is 1 (no filter).
-#' @param expected_acrodiff_thr A numeric threshold for the expected acrophase difference. Default is 0.524.
 #' @param bulk_amp_thr A numeric threshold for the bulk amplitude. Default is 0.5.
-#' @return A data frame summarizing the phi parameters (G, Ac, and phi) for rhythmic genes, or an empty data frame if no genes meet the criteria.
+#' @return A data frame summarizing the phi parameters (G, Ac, theta, and phi) for rhythmic genes, or an empty data frame if no genes meet the criteria.
 #' @importFrom dplyr filter select mutate across left_join %>% everything
 #' @importFrom tibble column_to_rownames
 #' @importFrom stats lm anova p.adjust model.matrix sd var
 #' @importFrom graphics points
 #' @export
-calc_phi = function(ZT, pb_cycling_results, var_cycling_results, cycling_p_thr = 0.05, var_p_thr = 1, expected_acrodiff_thr = 0.524, bulk_amp_thr = 0.5) {
+calc_phi = function(pb_cycling_results, var_cycling_results, cycling_p_thr = 0.05,  bulk_amp_thr = 0.5) {
     # Check if pb_cycling_results or var_cycling_results are empty
     if (nrow(pb_cycling_results) == 0) {
         stop("Error: pb_cycling_results is empty. No genes to process.")

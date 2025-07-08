@@ -37,7 +37,12 @@ seurat_obj$ZT = ZT
 
 cluster_phis = list()
 for(cluster_id in unique(seurat_obj$seurat_clusters)){
-  tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cluster_id)
+  tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cluster_id, top_n_genes = 15e3)
+  
+  cluster = subset(seurat_obj, subset = seurat_clusters == cluster_id)
+  vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
+  means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
+  plot(log(means), log(vars))
   
   pb_mat = tmp[[1]]
   var_mat = tmp[[2]]
