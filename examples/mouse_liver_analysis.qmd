@@ -136,6 +136,7 @@ input_cos = var_cyclers %>%
      left_join(pb_cycling, by = "Gene_Symbols") %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
     filter(p_statistic < 0.05) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
     dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
