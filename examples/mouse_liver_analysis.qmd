@@ -48,9 +48,9 @@ cluster_phis = list()
 for(cell_type in unique(seurat_obj$seurat_clusters)){
 print(paste("Analyzing", cell_type))
 cluster = subset(seurat_obj, subset = seurat_clusters == cell_type)
-vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
-means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
-plot(log(means), log(vars))
+# vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
+# means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
+# plot(log(means), log(vars))
 
 tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 10)
 
@@ -135,7 +135,7 @@ var_cyclers = var_cycling(ZT, var_mat, pb_mat, phase_pb)
 input_cos = var_cyclers %>% 
      left_join(pb_cycling, by = "Gene_Symbols") %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.2) %>%
+    filter(p_statistic < 0.05) %>%
     dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
@@ -151,7 +151,7 @@ phi_cos = input_cos %>%
 colnames(phi_cos) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos$phi)), "/",nrow(input_cos), " phi's not nan"  ))
 
-phi = calc_phi(ZT, pb_cycling, var_cyclers, cycling_p_thr = 0.2, bulk_amp_thr = 0.5)
+phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
 output_cos = merge(phi_cos, input_cos, by = 0)
 
@@ -199,7 +199,7 @@ ggplot() +
 input_cos_fix = var_cyclers_fixed %>% 
      left_join(pb_cycling, by = "Gene_Symbols") %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.2) %>%
+    filter(p_statistic < 0.05) %>%
     dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
@@ -215,7 +215,7 @@ phi_cos_fix = input_cos_fix %>%
 colnames(phi_cos_fix) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix$phi)), "/",nrow(input_cos_fix), " phi's not nan"  ))
 
-phi = calc_phi(ZT, pb_cycling, var_cyclers_fixed, cycling_p_thr = 0.1, bulk_amp_thr = 0.5)
+phi_fix = calc_phi(pb_cycling, var_cyclers_fixed, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
 output_cos_fix = merge(phi_cos_fix, input_cos_fix, by = 0)
 

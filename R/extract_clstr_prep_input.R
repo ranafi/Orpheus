@@ -1,7 +1,8 @@
-#' Extract Cluster from Seurat Object and Return Pseudobulk and Variance Matrices
+#' Extract Cluster from Seurat Object and Return Pseudobulk and Variance Matrices 
 #'
-#' This function processes a Seurat object to filter cells based on thresholds. extract normalized counts, compute pseudobulk data, 
-#' and compute variance matrices. It returns a list containing the pseudobulk normalized counts and variance matrices.
+#' This function processes a Seurat object to filter cells based on thresholds, extract normalized counts, compute pseudobulk data, 
+#' and compute variance matrices, while keeping data in a sparse matrix format for as long as possible to improve performance and reduce memory usage.
+#' It returns a list containing the pseudobulk normalized counts and variance matrices.
 #'
 #' @param seurat_obj A Seurat object containing single-cell RNA-seq data.
 #' @param cluster_id The cluster ID or name to subset the Seurat object.
@@ -16,81 +17,86 @@
 #' # pseudobulk_data <- extract_clstr_prep_input(seurat_obj, cluster_id = "2")
 #' @importFrom Seurat NormalizeData GetAssayData
 #' @importFrom SeuratObject Layers
-#' @importFrom dplyr %>% group_by summarise across everything
-#' @importFrom Seurat NormalizeData GetAssayData
-#' @importFrom stats sd var
+#' @importFrom stats sd
 #' @importFrom rlang is_empty
 #' @importFrom Matrix rowMeans
+#' @importFrom matrixStats rowVars
 #' @export
 extract_clstr_prep_input = function(seurat_obj, cluster_id, assay = "RNA", top_n_genes = 10000, cells_threshold = 10, clip_sd = 2){
-    cluster = subset(seurat_obj, subset = seurat_clusters == cluster_id)
+    # Subset to the cluster of interest
+    cluster <- subset(seurat_obj, subset = seurat_clusters == cluster_id)
 
-    #filter out cells with log(cts) >10, and < 8
-    max_cts_lim = exp(mean(log(cluster$nCount_RNA)) + clip_sd*sd(log(cluster$nCount_RNA)))
-    min_cts_lim = exp(mean(log(cluster$nCount_RNA)) - clip_sd*sd(log(cluster$nCount_RNA)))
-    # Subset the Seurat object
-    cluster <- subset(cluster, subset = nCount_RNA > min_cts_lim & nCount_RNA < max_cts_lim)
-    print(paste0("Removing cells with counts < ", min_cts_lim, " or > ", max_cts_lim))
-
-    cluster = NormalizeData(cluster, assay = assay, normalization.method = "RC", scale.factor = mean(cluster$nCount_RNA))
+    # Filter out cells with outlier total counts
+    if (ncol(cluster) > 1) {
+        log_counts <- log(cluster$nCount_RNA)
+        max_cts_lim <- exp(mean(log_counts) + clip_sd * sd(log_counts))
+        min_cts_lim <- exp(mean(log_counts) - clip_sd * sd(log_counts))
+        cluster <- subset(cluster, subset = nCount_RNA > min_cts_lim & nCount_RNA < max_cts_lim)
+        print(paste0("Removing cells with counts < ", round(min_cts_lim, 2), " or > ", round(max_cts_lim, 2)))
+    }
     
-    # Get all data layers
+    # Normalize data
+    cluster <- NormalizeData(cluster, assay = assay, normalization.method = "RC", scale.factor = mean(cluster$nCount_RNA))
+    
+    # Get all data layers and combine them into a single sparse matrix
     layers <- Layers(cluster[[assay]], search = "data")
-    # Extract normalized counts for each layer
     norm_counts_list <- lapply(layers, function(layer) {
-    GetAssayData(cluster[[assay]], layer = layer)
+        GetAssayData(cluster[[assay]], layer = layer)
     })
-
-    # Named list with normalized counts per subject/layer
-    names(norm_counts_list) <- layers
-
-    # Here I make pseudobulk by summing NORMED cell counts:
-    # Extract the RC-normalized values from the "data" slot
     rc_data <- do.call(cbind, norm_counts_list)
 
-    #keep top genes by mean across all cells
-    top_n_genes = min(top_n_genes, nrow(rc_data))
-    gene_means = Matrix::rowMeans(rc_data)
-    gene_mean_idx <- order(gene_means, decreasing = TRUE)[1:top_n_genes]  # Get idx of top n values
-    rc_data = rc_data[gene_mean_idx,]
+    # Keep top genes by mean expression across all cells
+    top_n_genes <- min(top_n_genes, nrow(rc_data))
+    gene_means <- Matrix::rowMeans(rc_data)
+    gene_mean_idx <- order(gene_means, decreasing = TRUE)[1:top_n_genes]
+    rc_data <- rc_data[gene_mean_idx, ]
 
-
-    # Extract metadata to get individual IDs
+   
+    # Get metadata and identify individuals to keep based on cell count threshold
     meta <- cluster@meta.data
+    cell_counts <- table(meta$orig.ident)
+    individuals_to_keep <- names(cell_counts[cell_counts >= cells_threshold])
 
-    # Convert to a dataframe (Cells x Genes)
-    rc_data_df <- as.data.frame(t(as.matrix(rc_data)))
-    rc_data_df$individualID <- meta$orig.ident  # Add individualID metadata
-
-
-    # Compute the mean per gene for each individual (instead of sum)
-    pseudobulk_rc <- rc_data_df %>%
-    group_by(individualID) %>%
-    summarise(across(everything(), \(x) mean(x, na.rm = TRUE)))  # Mean instead of sum
-
-    # Convert back to genes x individuals format
-    pseudobulk_rc_matrix <- as.data.frame(t(pseudobulk_rc[,-1]))  # Drop individualID column
-    colnames(pseudobulk_rc_matrix) <- pseudobulk_rc$individualID  # Rename columns
-
-
-    # Compute variance per gene for each individual
-    var_df_tmp <- rc_data_df %>%
-    group_by(individualID) %>%
-    summarise(across(everything(), \(x) var(x, na.rm = TRUE)))  # Compute variance
-
-    # Convert back to genes x individuals format
-    var_df <- as.data.frame(t(var_df_tmp[,-1]))  # Drop individualID column
-    colnames(var_df) <- var_df_tmp$individualID  # Rename columns
-
-
-    stopifnot(all(rownames(pseudobulk_rc_matrix) == rownames(var_df)))
-    stopifnot(all(rownames(pseudobulk_rc_matrix) == rownames(pseudobulk_rc_matrix)))
-
-    #Exclude subjects with fewer than cells_threshold cells:
-    rm_me = which(table(cluster$orig.ident) < cells_threshold)
-    if(!is_empty(rm_me)){
-        pseudobulk_rc_matrix = pseudobulk_rc_matrix[,-rm_me]
-        var_df = var_df[,-rm_me]
+    if (is_empty(individuals_to_keep)) {
+        warning(paste("No individuals found with at least", cells_threshold, "cells for cluster", cluster_id))
+        # Return empty list or empty data frames, consistent with the function's output format
+        empty_df <- data.frame(matrix(ncol = 0, nrow = nrow(rc_data)))
+        rownames(empty_df) <- rownames(rc_data)
+        return(list(pseudobulk_rc_matrix = empty_df, var_df = empty_df))
     }
-    return(list(pseudobulk_rc_matrix = pseudobulk_rc_matrix, var_df = var_df))
+    
+    # Pre-allocate result matrices for efficiency
+    n_genes <- nrow(rc_data)
+    n_individuals <- length(individuals_to_keep)
+    gene_names <- rownames(rc_data)
+    
+    pseudobulk_rc_matrix <- matrix(NA, nrow = n_genes, ncol = n_individuals, 
+                                   dimnames = list(gene_names, individuals_to_keep))
+    var_df <- matrix(NA, nrow = n_genes, ncol = n_individuals, 
+                     dimnames = list(gene_names, individuals_to_keep))
+
+    # Loop through each individual, subset the sparse matrix, and calculate stats
+    for (id in individuals_to_keep) {
+        # Get column indices for cells belonging to the current individual
+        cell_indices <- which(meta$orig.ident == id)
+        
+        # Subset the sparse matrix for the current individual. 
+        # 'drop = FALSE' is crucial to maintain matrix structure
+        individual_sparse_matrix <- rc_data[, cell_indices, drop = FALSE]
+        
+        # Calculate mean per gene 
+        pseudobulk_rc_matrix[, id] <- Matrix::rowMeans(individual_sparse_matrix)
+        
+        # Calculate variance per gene 
+        # For a single cell, variance is NA. rowVars handles this.
+        var_df[, id] <- matrixStats::rowVars(as.matrix(individual_sparse_matrix))
+    }
+    
+    # Final check for consistency 
+    stopifnot(all(rownames(pseudobulk_rc_matrix) == rownames(var_df)))
+    stopifnot(all(colnames(pseudobulk_rc_matrix) == colnames(var_df)))
+    
+    # Convert to data.frame 
+    return(list(pseudobulk_rc_matrix = as.data.frame(pseudobulk_rc_matrix), 
+                var_df = as.data.frame(var_df)))
 }

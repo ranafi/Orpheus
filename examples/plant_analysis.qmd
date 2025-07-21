@@ -39,10 +39,10 @@ cluster_phis = list()
 for(cluster_id in unique(seurat_obj$seurat_clusters)){
   tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cluster_id, top_n_genes = 15e3)
   
-  cluster = subset(seurat_obj, subset = seurat_clusters == cluster_id)
-  vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
-  means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
-  plot(log(means), log(vars))
+  # cluster = subset(seurat_obj, subset = seurat_clusters == cluster_id)
+  # vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
+  # means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
+  # plot(log(means), log(vars))
   
   pb_mat = tmp[[1]]
   var_mat = tmp[[2]]
@@ -86,7 +86,7 @@ for(cluster_id in unique(seurat_obj$seurat_clusters)){
  input_cos = var_cyclers %>% 
      left_join(pb_cycling, by = "Gene_Symbols") %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.2) %>%
+    filter(p_statistic < 0.05) %>%
     dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
@@ -102,7 +102,7 @@ phi_cos = input_cos %>%
 colnames(phi_cos) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos$phi)), "/",nrow(input_cos), " phi's not nan"  ))
 
-phi = calc_phi(ZT, pb_cycling, var_cyclers, cycling_p_thr = 0.2, bulk_amp_thr = 0.5)
+phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
 output_cos = merge(phi_cos, input_cos, by = 0)
 

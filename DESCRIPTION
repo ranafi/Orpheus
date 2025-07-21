@@ -15,6 +15,7 @@ Imports:
     Seurat,
     SeuratObject,
     stats,
+    matrixStats,
     tibble,
     tidyr,
     Matrix,

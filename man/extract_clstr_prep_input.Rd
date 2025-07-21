@@ -30,8 +30,9 @@ extract_clstr_prep_input(
 A list containing pseudobulk normalized counts and variance matrices.
 }
 \description{
-This function processes a Seurat object to filter cells based on thresholds. extract normalized counts, compute pseudobulk data, 
-and compute variance matrices. It returns a list containing the pseudobulk normalized counts and variance matrices.
+This function processes a Seurat object to filter cells based on thresholds, extract normalized counts, compute pseudobulk data, 
+and compute variance matrices, while keeping data in a sparse matrix format for as long as possible to improve performance and reduce memory usage.
+It returns a list containing the pseudobulk normalized counts and variance matrices.
 }
 \examples{
 # Example usage:
