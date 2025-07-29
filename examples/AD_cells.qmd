@@ -23,7 +23,7 @@ seurat_obj_ctl$orig.ident = seurat_obj_ctl$individualID
 ```
 
 ```{r}
-tmp = Orpheus::extract_clstr_prep_input2(seurat_obj_ctl, cluster_id = "0", clip_sd = 10, top_n_genes = 10e3, cells_threshold = 200)
+tmp = Orpheus::extract_clstr_prep_input_tmm(seurat_obj_ctl, cluster_id = "0", clip_sd = 10, top_n_genes = 15e3, cells_threshold = 10, normalize = T)
 
 
 pb_mat = tmp[[1]]
@@ -37,7 +37,6 @@ all(pb_cycling$Gene_Symbols == rownames(var_mat))
 pb_phases = as.numeric(pb_cycling$acrophase_bulk)
 var_cyclers = var_cycling(times, var_mat, pb_mat,phase_pb = pb_phases, time_units = "rad")
 
-phi = Orpheus::calc_phi(pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
 input_cos = var_cyclers %>% 
     left_join(pb_cycling, by = "Gene_Symbols") %>%
@@ -103,6 +102,13 @@ ggplot() +
   ylim(c(-20, 20))
   
   
+phi_ctl_filt = filter(phi, !is.na(phi))
+M = cor(phi_ctl_filt)
+
+library(ggcorrplot)
+ggcorrplot(M, method = "square", type = "upper", title = "CTL exc3.5", lab = T)
+
+phi_ctl_filt %>% rownames_to_column(var  = "Row.names") %>% arrange(phi) %>% select(Row.names, phi) %>% write.table(., "~/Desktop/ctl_exc35_phi.rnk", row.names = F, col.names = F, quote = F, sep = '\t')
 ```
 
 ```{r}
@@ -114,7 +120,7 @@ seurat_obj_ad = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F,
 seurat_obj_ad$seurat_clusters = "0"
 seurat_obj_ad$orig.ident = seurat_obj_ad$individualID
 
-tmp = Orpheus::extract_clstr_prep_input(seurat_obj_ad, cluster_id = "0", clip_sd = 10, top_n_genes = 15e3)
+tmp = Orpheus::extract_clstr_prep_input_tmm(seurat_obj_ad, cluster_id = "0", clip_sd = 10, top_n_genes = 15e3, cells_threshold = 10, normalize = T)
 
 pb_mat = tmp[[1]]
 var_mat = tmp[[2]]
@@ -128,16 +134,43 @@ all(pb_cycling_ad$Gene_Symbols == rownames(var_mat))
 pb_phases = as.numeric(pb_cycling_ad$acrophase_bulk)
 var_cyclers_ad = var_cycling(times, var_mat, pb_mat,phase_pb = pb_phases, time_units = "rad")
 
+input_cos_ad = var_cyclers_ad %>% 
+    left_join(pb_cycling_ad, by = "Gene_Symbols") %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC > full_model_AIC)
+
 phi_ad = Orpheus::calc_phi(pb_cycling_results = pb_cycling_ad, var_cycling_results = var_cyclers_ad, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+
+merged_df = merge(phi_ad, input_cos_ad, by = 0) %>% filter(!is.na(phi))
+hist(merged_df$acrodiff)
+
+phi_ad_filt = filter(phi_ad, !is.na(phi))
+M = cor(phi_ad_filt)
+
+library(ggcorrplot)
+ggcorrplot(M, method = "square", type = "upper", title = "CTL exc3.5", lab = T)
+
+phi_ad_filt %>% rownames_to_column(var  = "Row.names") %>% arrange(phi) %>% select(Row.names, phi) %>% write.table(., "~/Desktop/ad_exc35_phi.rnk", row.names = F, col.names = F, quote = F, sep = '\t')
+
+plot_rhythms(times, var_mat, pb_mat, plot_me = c("RPL13","RPL13A","RPL15",
+        "RPL17","RPL18","RPL23","RPL28","RPL29","RPL3","RPL38",
+        "RPL4","RPS11","RPS16","RPS23","RPS25","RPS27","RPS28",
+        "RPS6KA2","RPS6KA5","RPS8","RPSA"), time_units = "rads")
 ```
 
 ```{r}
 wilcox.test(phi$phi, phi_ad$phi)
 boxplot(phi$phi, phi_ad$phi)
 
-pb_results = merge(pb_cycling, pb_cycling_ad, by = "Gene_Symbols", suffixes = c("_CTL", "_AD"))
-plot(as.numeric(pb_results$amplitude_bulk_CTL), as.numeric(pb_results$amplitude_bulk_AD), xlim = c(0,10), ylim = c(0,10))
-lines(c(0,100), c(0, 100))
+merged_phi = merge(phi, phi_ad, by = 0, suffixes = c("_CTL", "_AD"))
+
+wilcox.test(merged_phi$phi_CTL, merged_phi$phi_AD, paired = T)
+boxplot(merged_phi$phi_CTL, merged_phi$phi_AD)
 ```
 
 ```{r}

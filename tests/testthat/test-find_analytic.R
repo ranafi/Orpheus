@@ -78,8 +78,6 @@ test_that("var_cycling_fix_acro calculates correct cycling params", {
   pb_mat = rbind(pb1, pb2)
   var_mat = rbind(var1, var2)
 
-  plot(x, var1)
-  plot(x, var2)
 
   res = var_cycling_fix_acro(x, var_mat, pb_mat, c(pi, 4*pi/12))
 
@@ -111,7 +109,7 @@ test_that("acrodiffs calculation works as intended", {
   var_mat = rbind(var1, var2, var3, var4)
   rownames(pb_mat) = rownames(var_mat) = c("Gene1", "Gene2", "Gene3", "Gene4")
 
-  pb_cycling = is_cycling(rad, pb_mat, time_units = "rad")
+  pb_cycling = is_cycling(x, pb_mat, time_units = "rad")
   pb_phases = as.numeric(unname(unlist(pb_cycling$acrophase_bulk)))
   var_cyclers = var_cycling(x, var_mat, pb_mat,pb_phases , time_units = "rad")
 

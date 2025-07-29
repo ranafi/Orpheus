@@ -188,7 +188,7 @@ input = var_cyclers %>%
   left_join(pb_cycling, by = "Gene_Symbols") %>%
   mutate(across(-Gene_Symbols, as.numeric)) %>%
   filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
-  # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+  mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
   # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
   # filter(keep_acrodiff == TRUE) %>%
   dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
@@ -225,7 +225,7 @@ phi = input %>%
   as.data.frame
 colnames(phi) = c("G_pred", "Ac_pred", "theta_pred","phi_pred")
 
-phi2 = calc_phi(ZT, pb_cycling, var_cyclers )
+phi2 = calc_phi( pb_cycling, var_cyclers )
 
 plot_df = merge(input, phi, by = 0) %>%
   merge(., gene_info, by.x="Row.names", by.y = 0)%>%

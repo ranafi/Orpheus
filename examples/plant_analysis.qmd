@@ -34,63 +34,101 @@ seurat_obj$ZT = ZT
 ## Now do Methods of Moments analysis (ORPHEUS)
 
 ```{r}
-
 cluster_phis = list()
-for(cluster_id in unique(seurat_obj$seurat_clusters)){
-  tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cluster_id, top_n_genes = 15e3)
-  
-  # cluster = subset(seurat_obj, subset = seurat_clusters == cluster_id)
-  # vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
-  # means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
-  # plot(log(means), log(vars))
-  
-  pb_mat = tmp[[1]]
-  var_mat = tmp[[2]]
-  
-  matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
-  ZT = as.numeric(matches[,2])
-  
-  pb_cycling = is_cycling(ZT, pb_mat)
-  
-  all(pb_cycling$Gene_Symbols == rownames(pb_mat))
-  phase_pb = pb_cycling$acrophase_bulk  %>% unname %>% unlist %>% as.numeric
+for(cell_type in unique(seurat_obj$seurat_clusters)){
+print(paste("Analyzing", cell_type))
+# cluster = subset(seurat_obj, subset = seurat_clusters == cell_type)
+# vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
+# means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
+# plot(log(means), log(vars))
 
-  #Run cosinor regression on variance data, where phases are fixed.
-  var_cyclers = var_cycling(ZT, var_mat, pb_mat, phase_pb, time_units = "hrs")
-  var_cyclers_fixed = var_cycling_fix_acro(ZT, var_mat, pb_mat, phase_pb)
+# tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 10)
+tmp = extract_clstr_prep_input_tmm(seurat_obj, cluster_id = cell_type, clip_sd = 2, normalize = F)
 
-  plot(-log(as.numeric(var_cyclers_fixed$double_freq_p_statistic)), -log(as.numeric(var_cyclers$double_freq_p_statistic)))
-  
-  # JTK_res = var_cycling_JTK(ZT, var_mat, pb_mat, out_file_circ = "input_12hr.txt", out_file_mean = "input_24hr.txt", out_file_pb = "input_pb.txt",out_dir = "output/")
-  # 
-  # doub_cyclers_JTK = JTK_res[[1]]
-  # fund_cycling_JTK = JTK_res[[2]]
-  # pb_cyclers_JTK = JTK_res[[3]] %>% mutate(acrophase_bulk = acrophase_bulk*pi/12)
-  # 
-  # var_cycling_JTK_res = merge(doub_cyclers_JTK, fund_cycling_JTK , by = "Gene_Symbols", all = TRUE) %>% mutate(double_freq_acrophase =double_freq_acrophase*pi/12 ) %>% mutate(fund_acro = fund_acro *pi/12)
-  
-#merge(pb_cycling, pb_cyclers_JTK, by = "Gene_Symbols", suffixes = c("_cos","_JTK" )) %>%
-#   filter(p_statistic_cos < 0.05 & p_statistic_JTK < 0.05)%>%
-# ggplot()+
-#   geom_point(aes((as.numeric(amplitude_bulk_cos)),as.numeric(amplitude_bulk_JTK)))+ylim(c(0,2*pi))+xlim(c(0,2*pi))
+#Get Pseudobulk and variance for each gene for each subject
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+rm_rows = which((rowSums(var_mat > 0 ) < 2) | (rowSums(pb_mat > 0) < 2))
+if(!purrr::is_empty(rm_rows)){
+  pb_mat = pb_mat[-rm_rows, ]
+  var_mat = var_mat[-rm_rows, ]
+}
 
-#merge(var_cyclers, var_cycling_JTK_res, by = "Gene_Symbols", suffixes = c("_cos","_JTK" )) %>%
-#   filter(double_freq_p_statistic_cos < 0.1 & double_freq_p_statistic_JTK < 0.1)%>%
-# ggplot()+
-#   geom_point(aes((as.numeric(double_freq_acrophase_cos)),as.numeric(double_freq_acrophase_JTK)))+ylim(c(0,pi))+xlim(c(0,pi))
 
-  #phi = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers, var_p_thr = .2, expected_acrodiff_thr = 3/12*pi, bulk_amp_thr = 0.2)
+tmp2 = extract_clstr_prep_input_tmm(seurat_obj, cluster_id = cell_type, clip_sd = 2, normalize = T)
+
+pb_mat2 = tmp2[[1]]
+var_mat2 = tmp2[[2]]
+rm_rows2 = which((rowSums(var_mat2 > 0) < 2) | (rowSums(pb_mat2 > 0) < 2))
+if(!purrr::is_empty(rm_rows2)){
+  pb_mat2 = pb_mat2[-rm_rows2, ]
+  var_mat2 = var_mat2[-rm_rows2, ]
+}
+
+
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+if(length(unique(diff(ZT))) != 2 || length(unique(ZT)) < 6){
+  print("Cell does not have time points suitable for analysis")
+  next
+}
+
+#Call cosinor regression methods, where phases of variance wave are NOT fixed:
+pb_cycling = is_cycling(ZT, pb_mat)
+pb_cycling2 = is_cycling(ZT, pb_mat2)
+
+pb_cycling_tmm_filt = filter(pb_cycling2, as.numeric(p_statistic)<0.05)
+pb_cycling_raw_filt = filter(pb_cycling, as.numeric(p_statistic)<0.05)
+
+ggvenn::ggvenn(list("sig raw" = pb_cycling_raw_filt$Gene_Symbols,
+                    "sig tmm" = pb_cycling_tmm_filt$Gene_Symbols))
+merged_pb_cycling = merge(pb_cycling_tmm_filt, pb_cycling_raw_filt, by = "Gene_Symbols", suffixes = c("_tmm", "_raw"))
+plot(as.numeric(merged_pb_cycling$acrophase_bulk_tmm), as.numeric(merged_pb_cycling$acrophase_bulk_raw))
+# var_cyclers = var_cycling(ZT, var_mat, pb_mat)
   
-  # phi = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers_fixed, var_p_thr = 1, expected_acrodiff_thr = 1, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
-  
- input_cos = var_cyclers %>% 
+#Get info to run var_cycling_fix_acro, where phases ARE fixed
+all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
+phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
+phase_pb2 = pb_cycling2 %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
+# circ_genes = filter(pb_cycling, as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
+
+
+#hist(as.numeric(phase_pb))
+
+#Run cosinor regression on variance data, where phases are fixed.
+var_cyclers_fixed = var_cycling_fix_acro(ZT, var_mat, pb_mat, phase_pb)
+var_cyclers_fixed2 = var_cycling_fix_acro(ZT, var_mat2, pb_mat2, phase_pb2)
+ggvenn::ggvenn(list("sig RC" = var_cyclers_fixed$Gene_Symbols[as.numeric(var_cyclers_fixed$double_freq_p_statistic) < 0.05],
+                    "sig tmm" = var_cyclers_fixed2$Gene_Symbols[as.numeric(var_cyclers_fixed2$double_freq_p_statistic) < 0.05]))
+
+
+var_cyclers = var_cycling(ZT, var_mat, pb_mat, phase_pb)
+var_cyclers2 = var_cycling(ZT, var_mat2, pb_mat2, phase_pb2)
+
+var_cyclers_raw_filt = filter(var_cyclers, as.numeric(double_freq_p_statistic)<0.05)
+var_cyclers_tmm_filt = filter(var_cyclers2, as.numeric(double_freq_p_statistic)<0.05)
+ggvenn::ggvenn(list("sig raw" = var_cyclers_raw_filt$Gene_Symbols,
+                    "sig tmm" = var_cyclers_tmm_filt$Gene_Symbols))
+
+merged_var_cyclers = merge(var_cyclers_raw_filt, var_cyclers_tmm_filt, by = "Gene_Symbols", suffixes = c("_raw", "_tmm"))
+plot(as.numeric(merged_var_cyclers$double_freq_acrophase_raw), as.numeric(merged_var_cyclers$double_freq_acrophase_tmm))
+
+
+# plot_rhythms(ZT, var_mat2, pb_mat2, plot_me = c("AT5G38430", "AT3G01500", "AT3G26740", "AT2G05100"), time_units = "hrs")
+
+#### cosinor results 1 ###
+input_cos = var_cyclers %>% 
      left_join(pb_cycling, by = "Gene_Symbols") %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
     filter(p_statistic < 0.05) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
     dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
     filter(partial_model_AIC > full_model_AIC)
+
+hist(input_cos$acrodiff, main = paste(cell_type, "raw counts, free cosinor acrodiffs"))
 
   # Calculate phi parameters
 phi_cos = input_cos %>%
@@ -104,7 +142,7 @@ print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos$phi)), "/",nrow(input_c
 
 phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
-output_cos = merge(phi_cos, input_cos, by = 0)
+output_cos_raw = merge(phi_cos, input_cos, by = 0)
 
 
 plot_df = merge(input_cos, phi_cos, by = 0)
@@ -120,38 +158,113 @@ y_line_ub <- .5*x_line_values^2
 line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
 
 # Create the ggplot
-library(ggplot2)
-ggplot() +
-  geom_point(
-    data = plot_df,
-    aes(x = amplitude_bulk, y = double_freq_amplitude)
-  ) +
-  geom_line(
-    data = line_data,
-    aes(x = x, y = y1),
-    color = "blue", 
-    linewidth = 1   
-  ) +
-  geom_line(
-    data = line_data,
-    aes(x = x, y = y2),
-    color = "blue", 
-    linewidth = 1   
-  ) +
-  coord_cartesian() +
-  labs(
-    x = "Amplitude bulk",
-    y = "Double Frequency Amplitude (input$double_freq_amplitude)"
-  ) +
-  theme_minimal()+
-  scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
-  
+# library(ggplot2)
+# ggplot() +
+#   geom_point(
+#     data = plot_df,
+#     aes(x = amplitude_bulk, y = double_freq_amplitude)
+#   ) +
+#   geom_line(
+#     data = line_data,
+#     aes(x = x, y = y1),
+#     color = "blue", 
+#     linewidth = 1   
+#   ) +
+#   geom_line(
+#     data = line_data,
+#     aes(x = x, y = y2),
+#     color = "blue", 
+#     linewidth = 1   
+#   ) +
+#   coord_cartesian() +
+#   labs(
+#     x = "Amplitude bulk",
+#     y = "Double Frequency Amplitude (input$double_freq_amplitude)"
+#   ) +
+#   theme_minimal()+
+#   scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
 
-#############
+#### cosinor results tmm values ####
+input_cos_tmm = var_cyclers2 %>% 
+     left_join(pb_cycling2, by = "Gene_Symbols") %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC > full_model_AIC)
+
+hist(input_cos_tmm$acrodiff, main = paste(cell_type, "tmm cosine raw"))
+
+phi_cos_tmm = input_cos_tmm %>%
+  apply(., 1, function(row) {
+    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+  }) %>%
+  t %>%
+  as.data.frame
+colnames(phi_cos_tmm) = c("G_pred", "Ac_pred", "theta", "phi")
+print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_tmm$phi)), "/",nrow(input_cos_tmm), " phi's not nan"  ))
+
+phi_tmm = calc_phi(pb_cycling2, var_cyclers2, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+
+output_cos_tmm = merge(phi_cos_tmm, input_cos_tmm, by = 0)
+
+plot_df = merge(input_cos_tmm, phi_cos_tmm, by = 0)
+
+theta = 1
+# Prepare data for the line
+x_line_values <- seq(0, max(plot_df$amplitude_bulk), by = 0.1)
+# y_line_values <- -x_line_values^2 * (exp(1)^9 - 1 - theta) / (2*exp(1)^9)
+# y_lines_values2 <- -(theta/2)*x_line_values^2
+# y_line_values = -.5*exp(-2^2)*x_line_values^2*(exp(2^2)-theta - 1)
+y_line_lb <- -(theta/2)*x_line_values^2
+y_line_ub <- .5*x_line_values^2
+line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
+
+# Create the ggplot
+# library(ggplot2)
+# ggplot() +
+#   geom_point(
+#     data = plot_df,
+#     aes(x = amplitude_bulk, y = double_freq_amplitude)
+#   ) +
+#   geom_line(
+#     data = line_data,
+#     aes(x = x, y = y1),
+#     color = "blue", 
+#     linewidth = 1   
+#   ) +
+#   geom_line(
+#     data = line_data,
+#     aes(x = x, y = y2),
+#     color = "blue", 
+#     linewidth = 1   
+#   ) +
+#   coord_cartesian() +
+#   labs(
+#     x = "Amplitude bulk",
+#     y = "Double Frequency Amplitude (input$double_freq_amplitude)"
+#   ) +
+#   theme_minimal()+
+#   scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
+
+
+# phi_cos_tmm_filt = filter(phi_cos_tmm, !is.na(phi))
+# vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
+# means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
+# theta_measured = (vars-means)/means^2
+# names(theta_measured) = rownames(cluster@assays$RNA$counts)
+# 
+# phi_cos_tmm_filt$theta_measured = theta_measured[match(rownames(phi_cos_tmm_filt), names(theta_measured))]
+# 
+# phi_cos$theta_measured = theta_measured[match(rownames(phi_cos), names(theta_measured))]
+
+#### cosinor results  (fixed acrophase) ###
 input_cos_fix = var_cyclers_fixed %>% 
      left_join(pb_cycling, by = "Gene_Symbols") %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.2) %>%
+    filter(p_statistic < 0.05) %>%
     dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
@@ -167,10 +280,9 @@ phi_cos_fix = input_cos_fix %>%
 colnames(phi_cos_fix) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix$phi)), "/",nrow(input_cos_fix), " phi's not nan"  ))
 
-phi = calc_phi(ZT, pb_cycling, var_cyclers_fixed, cycling_p_thr = 0.1, bulk_amp_thr = 0.5)
+phi_fix = calc_phi(pb_cycling, var_cyclers_fixed, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
-output_cos_fix = merge(phi_cos_fix, input_cos_fix, by = 0)
-
+output_cos_fix_raw = merge(phi_cos_fix, input_cos_fix, by = 0)
 
 plot_df = merge(input_cos_fix, phi_cos_fix, by = 0)
 
@@ -185,36 +297,81 @@ y_line_ub <- .5*x_line_values^2
 line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
 
 # Create the ggplot
-library(ggplot2)
-ggplot() +
-  geom_point(
-    data = plot_df,
-    aes(x = amplitude_bulk, y = double_freq_amplitude)
-  ) +
-  geom_line(
-    data = line_data,
-    aes(x = x, y = y1),
-    color = "blue", 
-    linewidth = 1   
-  ) +
-  geom_line(
-    data = line_data,
-    aes(x = x, y = y2),
-    color = "blue", 
-    linewidth = 1   
-  ) +
-  coord_cartesian() +
-  labs(
-    x = "Amplitude bulk",
-    y = "Double Frequency Amplitude (input$double_freq_amplitude)"
-  ) +
-  theme_minimal()+
-  scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
-  
-  
-  cluster_phis <- append(cluster_phis, list(phi_preds))
+# library(ggplot2)
+# ggplot() +
+#   geom_point(
+#     data = plot_df,
+#     aes(x = amplitude_bulk, y = double_freq_amplitude)
+#   ) +
+#   geom_line(
+#     data = line_data,
+#     aes(x = x, y = y1),
+#     color = "blue", 
+#     linewidth = 1   
+#   ) +
+#   geom_line(
+#     data = line_data,
+#     aes(x = x, y = y2),
+#     color = "blue", 
+#     linewidth = 1   
+#   ) +
+#   coord_cartesian() +
+#   labs(
+#     x = "Amplitude bulk",
+#     y = "Double Frequency Amplitude (input$double_freq_amplitude)"
+#   ) +
+#   theme_minimal()+
+#   scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
+
+
+#### cosinor results fixed acrophase tmm ###
+input_cos_fix_tmm = var_cyclers_fixed2 %>% 
+     left_join(pb_cycling2, by = "Gene_Symbols") %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC > full_model_AIC)
+
+  # Calculate phi parameters
+phi_cos_fix_tmm = input_cos_fix_tmm %>%
+  apply(., 1, function(row) {
+    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+  }) %>%
+  t %>%
+  as.data.frame
+colnames(phi_cos_fix_tmm) = c("G_pred", "Ac_pred", "theta", "phi")
+print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix_tmm$phi)), "/",nrow(input_cos_fix_tmm), " phi's not nan"  ))
+
+phi_fix_tmm = calc_phi(pb_cycling2, var_cyclers_fixed2, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+
+ output_cos_fix_tmm = merge(phi_cos_fix_tmm, input_cos_fix_tmm, by = 0)
+
+ 
+ local_res =  list("free_raw" = output_cos_raw, "fix_raw" = output_cos_fix_raw, "free_tmm" = output_cos_tmm, "fix_tmm" = output_cos_fix_tmm)
+ names(local_res) = paste(cell_type, names(local_res))
+ cluster_phis <- append(cluster_phis, list(local_res))
 
 }
+```
 
+```{r}
+cos_phis_raw <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
 
+cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[3]]
+  current_df$Source <- names(cluster_phis[[source_name]][3])
+  current_df
+}))
+
+cos_phis_raw_filt = filter(cos_phis_raw,!is.nan(phi))
+table(cos_phis_raw_filt$Source)
+
+cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
+table(cos_phis_tmm_filt$Source)
 ```
