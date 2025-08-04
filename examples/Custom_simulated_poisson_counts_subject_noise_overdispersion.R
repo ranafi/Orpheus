@@ -1,6 +1,6 @@
 library(Seurat)
 library(dplyr)
-setwd("~/Box Sync/Henry_stuff/Orpheus/Orpheus/R")
+# setwd("~/Box Sync/Henry_stuff/Orpheus/Orpheus/R")
 devtools::check()
 library(Orpheus)
 
@@ -133,7 +133,7 @@ simulate_scRNAseq_circadian <- function(n = 10000, m = 5000, p_circ = 0.1,n_time
   ))
 }
 
-phi_sd = 0.3
+phi_sd = 0.0
 epsilon_sd = 0.4
 # sim <- simulate_scRNAseq_circadian(n = 1000, m = 5000, p_circ = .1, phi_sd = phi_sd,
 #                                    A_range = c(0.1, 2), G_range = c(0.1, 2))
@@ -170,6 +170,9 @@ circ_genes_phases = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% se
 var_cyclers = var_cycling(ZT,var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
 var_cyclers2 = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
 
+test = merge(var_cyclers, var_cyclers2, by = "Gene_Symbols")
+plot(as.numeric(test$double_freq_amplitude.x), as.numeric(test$double_freq_amplitude.y))
+lines(c(-100, 100), c(-100, 100))
 
 # JTK_res = var_cycling_JTK(ZT*12/pi, var_mat, pb_mat, out_file_circ = "input_12hr.txt", out_file_mean = "input_24hr.txt", out_file_pb = "input_pb.txt",out_dir = "output/")
 # 
@@ -182,20 +185,20 @@ var_cyclers2 = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,
 # phi = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cyclers, var_p_thr = .3, expected_acrodiff_thr = .5)
 # hist(phi$phi)
 
-expected_acrodiff_thr = 3*pi/12
+# expected_acrodiff_thr = 3*pi/12
 
 input = var_cyclers %>% 
-  left_join(pb_cycling, by = "Gene_Symbols") %>%
+  left_join(pb_cycling, by = "Gene_Symbols", suffix= c("_var", "_pb")) %>%
   mutate(across(-Gene_Symbols, as.numeric)) %>%
   filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
   mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
   # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
   # filter(keep_acrodiff == TRUE) %>%
-  dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+  dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, everything()) %>%
   column_to_rownames("Gene_Symbols")%>%
   filter( amplitude_bulk >= 0.5) %>%
   # select(c(1:5)) %>%
-  filter(partial_model_AIC > full_model_AIC)
+  filter(partial_model_AIC_var > full_model_AIC_var)
 
 find_analytic = function(V_2w, V_w, S_amp, S_DC){
   
@@ -225,7 +228,7 @@ phi = input %>%
   as.data.frame
 colnames(phi) = c("G_pred", "Ac_pred", "theta_pred","phi_pred")
 
-phi2 = calc_phi( pb_cycling, var_cyclers )
+# phi2 = calc_phi( pb_cycling, var_cyclers )
 
 plot_df = merge(input, phi, by = 0) %>%
   merge(., gene_info, by.x="Row.names", by.y = 0)%>%

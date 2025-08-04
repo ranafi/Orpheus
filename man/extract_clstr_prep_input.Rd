@@ -10,7 +10,9 @@ extract_clstr_prep_input(
   assay = "RNA",
   top_n_genes = 10000,
   cells_threshold = 10,
-  clip_sd = 2
+  clip_sd = 2,
+  normalize = TRUE,
+  verbose = TRUE
 )
 }
 \arguments{
@@ -25,6 +27,10 @@ extract_clstr_prep_input(
 \item{cells_threshold}{The minimum number of cells required per individual (default is 10).}
 
 \item{clip_sd}{The number of standard deviations to use for clipping cells based on counts (default is 2).}
+
+\item{normalize}{Logical indicating whether to normalize the data using edgeR's TMM method (default is TRUE).}
+
+\item{verbose}{Logical indicating whether to print progress messages (default is TRUE).}
 }
 \value{
 A list containing pseudobulk normalized counts and variance matrices.

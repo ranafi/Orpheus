@@ -53,13 +53,13 @@ cluster = subset(seurat_obj, subset = seurat_clusters == cell_type)
 # plot(log(means), log(vars))
 
 # tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 10)
-tmp = extract_clstr_prep_input_tmm(seurat_obj, cluster_id = cell_type, clip_sd = 2, normalize = F)
+tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 2, normalize = F)
 
 #Get Pseudobulk and variance for each gene for each subject
 pb_mat = tmp[[1]]
 var_mat = tmp[[2]]
 
-tmp2 = extract_clstr_prep_input_tmm(seurat_obj, cluster_id = cell_type, clip_sd = 2, normalize = T)
+tmp2 = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 2, normalize = T)
 
 pb_mat2 = tmp2[[1]]
 var_mat2 = tmp2[[2]]
@@ -110,8 +110,8 @@ ggvenn::ggvenn(list("sig RC" = var_cyclers_fixed$Gene_Symbols[as.numeric(var_cyc
 var_cyclers = var_cycling(ZT, var_mat, pb_mat, phase_pb)
 var_cyclers2 = var_cycling(ZT, var_mat2, pb_mat2, phase_pb2)
 
-var_cyclers_raw_filt = filter(var_cyclers, as.numeric(double_freq_p_statistic)<0.05)
-var_cyclers_tmm_filt = filter(var_cyclers2, as.numeric(double_freq_p_statistic)<0.05)
+var_cyclers_raw_filt = filter(var_cyclers, as.numeric(full_model_AIC)<as.numeric(partial_model_AIC))
+var_cyclers_tmm_filt = filter(var_cyclers2, as.numeric(full_model_AIC)<as.numeric(partial_model_AIC))
 ggvenn::ggvenn(list("sig raw" = var_cyclers_raw_filt$Gene_Symbols,
                     "sig tmm" = var_cyclers_tmm_filt$Gene_Symbols))
 
@@ -171,14 +171,16 @@ plot(as.numeric(merged_var_cyclers$double_freq_acrophase_raw), as.numeric(merged
 
 #### cosinor results 1 ###
 input_cos = var_cyclers %>% 
-     left_join(pb_cycling, by = "Gene_Symbols") %>%
+    left_join(pb_cycling, by="Gene_Symbols", suffix=c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
+    # filter(p_statistic < 0.05) %>%
+    filter(full_model_BIC_pb < partial_model_BIC_pb)%>%
     mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC > full_model_AIC)
+    # filter(partial_model_AIC > full_model_AIC)
+    filter(partial_model_BIC_var > full_model_BIC_var)
 
 hist(input_cos$acrodiff, main = paste(cell_type, "raw counts, free cosinor acrodiffs"))
 
@@ -192,7 +194,7 @@ phi_cos = input_cos %>%
 colnames(phi_cos) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos$phi)), "/",nrow(input_cos), " phi's not nan"  ))
 
-phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+# phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
 output_cos_raw = merge(phi_cos, input_cos, by = 0)
 
@@ -238,16 +240,18 @@ line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
 
 #### cosinor results tmm values ####
 input_cos_tmm = var_cyclers2 %>% 
-     left_join(pb_cycling2, by = "Gene_Symbols") %>%
+    left_join(pb_cycling2, by="Gene_Symbols", suffix=c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
+    # filter(p_statistic < 0.05) %>%
+    filter(full_model_BIC_pb < partial_model_BIC_pb) %>%
     mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC > full_model_AIC)
+    # filter(partial_model_AIC > full_model_AIC)
+    filter(partial_model_BIC_var > full_model_BIC_var)
 
-hist(input_cos_tmm$acrodiff, main = paste(cell_type, "tmm cosine raw"))
+hist(input_cos_tmm$acrodiff, main = paste(cell_type, "tmm cosine free"))
 
 phi_cos_tmm = input_cos_tmm %>%
   apply(., 1, function(row) {
@@ -258,7 +262,7 @@ phi_cos_tmm = input_cos_tmm %>%
 colnames(phi_cos_tmm) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_tmm$phi)), "/",nrow(input_cos_tmm), " phi's not nan"  ))
 
-phi_tmm = calc_phi(pb_cycling2, var_cyclers2, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+# phi_tmm = calc_phi(pb_cycling2, var_cyclers2, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
 output_cos_tmm = merge(phi_cos_tmm, input_cos_tmm, by = 0)
 
@@ -314,13 +318,16 @@ line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
 
 #### cosinor results  (fixed acrophase) ###
 input_cos_fix = var_cyclers_fixed %>% 
-     left_join(pb_cycling, by = "Gene_Symbols") %>%
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    # filter(p_statistic < 0.05) %>%
+    filter(full_model_BIC_pb < partial_model_BIC_pb) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC > full_model_AIC)
+    # filter(partial_model_AIC > full_model_AIC)
+    filter(partial_model_BIC_var > full_model_BIC_var)
+
 
   # Calculate phi parameters
 phi_cos_fix = input_cos_fix %>%
@@ -332,7 +339,7 @@ phi_cos_fix = input_cos_fix %>%
 colnames(phi_cos_fix) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix$phi)), "/",nrow(input_cos_fix), " phi's not nan"  ))
 
-phi_fix = calc_phi(pb_cycling, var_cyclers_fixed, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+# phi_fix = calc_phi(pb_cycling, var_cyclers_fixed, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
 output_cos_fix_raw = merge(phi_cos_fix, input_cos_fix, by = 0)
 
@@ -378,13 +385,15 @@ line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
 
 #### cosinor results fixed acrophase tmm ###
 input_cos_fix_tmm = var_cyclers_fixed2 %>% 
-     left_join(pb_cycling2, by = "Gene_Symbols") %>%
+    left_join(pb_cycling2, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    # filter(p_statistic < 0.05) %>%
+    filter(full_model_BIC_pb < partial_model_BIC_pb) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC > full_model_AIC)
+    # filter(partial_model_AIC > full_model_AIC)
+    filter(partial_model_BIC_var > full_model_BIC_var)
 
   # Calculate phi parameters
 phi_cos_fix_tmm = input_cos_fix_tmm %>%
@@ -396,7 +405,7 @@ phi_cos_fix_tmm = input_cos_fix_tmm %>%
 colnames(phi_cos_fix_tmm) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix_tmm$phi)), "/",nrow(input_cos_fix_tmm), " phi's not nan"  ))
 
-phi_fix_tmm = calc_phi(pb_cycling2, var_cyclers_fixed2, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+# phi_fix_tmm = calc_phi(pb_cycling2, var_cyclers_fixed2, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
  output_cos_fix_tmm = merge(phi_cos_fix_tmm, input_cos_fix_tmm, by = 0)
 

@@ -81,7 +81,6 @@ test_that("var_cycling_fix_acro calculates correct cycling params", {
 
   res = var_cycling_fix_acro(x, var_mat, pb_mat, c(pi, 4*pi/12))
 
-  expect_length(res, 9)
   expect_equal(as.numeric(res$double_freq_amplitude), c(3, 1), tolerance = 1e-6)  
   expect_equal(as.numeric(res$fund_amp), c(4, 3), tolerance = 1e-6)  
 

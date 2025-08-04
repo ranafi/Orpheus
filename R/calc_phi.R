@@ -61,14 +61,14 @@ calc_phi = function(pb_cycling_results, var_cycling_results, cycling_p_thr = 0.0
     print(paste("Number of cycling genes: ", length(circ_genes)))
 
     input = var_cycling_results %>% 
-        left_join(pb_cycling_results, by = "Gene_Symbols") %>%
+        left_join(pb_cycling_results, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
         mutate(across(-Gene_Symbols, as.numeric)) %>%
         filter(p_statistic < cycling_p_thr) %>%
         # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
         # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
-        dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+        dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
         column_to_rownames("Gene_Symbols")%>%
-        filter(partial_model_AIC > full_model_AIC)
+        filter(partial_model_AIC_var > full_model_AIC_var)
 
     # hist(input$acrodiff, main = "Acrophase difference histogram", xlab = "Acrophase difference (radians)")
     # Check if input is empty after filtering

@@ -40,7 +40,13 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
     }
     
     partial_model = lm(gexp1 ~ 1)
+    partial_model_AIC = AIC(partial_model)
+    partial_model_BIC = BIC(partial_model)
+
     full_model = lm(gexp1 ~ sin(times1) + cos(times1) )
+    full_model_AIC = AIC(full_model)
+    full_model_BIC = BIC(full_model)
+
     design_matrix <- model.matrix(gexp1 ~ sin(times1) + cos(times1))
     
     anova_results = anova(partial_model, full_model)
@@ -57,7 +63,9 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
     
     
     
-    gene_summary = cbind( Gene_Symbols, acrophase_bulk,amplitude_bulk, p_statistic, amp_ratio, sin_coff, cos_coeff, mesor_bulk)
+    gene_summary = cbind( Gene_Symbols, acrophase_bulk,amplitude_bulk,
+              p_statistic, amp_ratio, sin_coff, cos_coeff, mesor_bulk,
+              partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC)
     
     return(gene_summary)
     
@@ -110,8 +118,12 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     
     partial_model = lm(gexp1 ~ m1)
     partial_model_AIC = AIC(partial_model)
+    partial_model_BIC = BIC(partial_model)
+
     full_model = lm(gexp1 ~ sin(2*times1) + cos(2*times1) + m1)
     full_model_AIC = AIC(full_model)
+    full_model_BIC = BIC(full_model)
+
     design_matrix <- model.matrix(gexp1 ~ sin(2*times1) + cos(2*times1) + m1)
     
     anova_results = anova(partial_model, full_model)
@@ -150,7 +162,9 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     #MESOR or mean of the fitted variance wave
     var_mesor = mean( full_model$fitted.values)
 
-    gene_summary = cbind( Gene_Symbols, double_freq_acrophase, double_freq_amplitude, double_freq_p_statistic, fund_amp, fund_acro, var_mesor, partial_model_AIC, full_model_AIC, raw_2w_amp)
+    gene_summary = cbind( Gene_Symbols, double_freq_acrophase, double_freq_amplitude,
+          double_freq_p_statistic, fund_amp, fund_acro, var_mesor,
+          partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC, raw_2w_amp)
     
     
     
@@ -205,10 +219,12 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
 
     partial_model = lm(gexp1 ~ m1)
     partial_model_AIC = AIC(partial_model)
+    partial_model_BIC = BIC(partial_model)
 
     double_wave = cos(2 * (times1- pi/2 - phase_bulk))
     full_model = lm(gexp1 ~ double_wave + m1)
     full_model_AIC = AIC(full_model)
+    full_model_BIC = BIC(full_model)
     
     #What is the amplitude of the fundamental according to V2?
     find_Af = lm(full_model$coefficients[["m1"]]*m1 ~ cos(times1-phase_bulk))
@@ -224,7 +240,10 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
     #MESOR or mean of the fitted variance wave
     var_mesor = mean( full_model$fitted.values)
 
-    gene_summary = cbind( Gene_Symbols, double_freq_amplitude, double_freq_p_statistic, fund_amp, var_mesor, partial_model_AIC, full_model_AIC)
+    gene_summary = cbind( Gene_Symbols, double_freq_amplitude, 
+            double_freq_p_statistic, fund_amp, var_mesor,
+            partial_model_AIC, full_model_AIC,
+            partial_model_BIC, full_model_BIC)
     
     
     
