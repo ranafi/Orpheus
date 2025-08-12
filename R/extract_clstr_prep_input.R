@@ -125,5 +125,5 @@ extract_clstr_prep_input = function(seurat_obj, cluster_id, assay = "RNA", top_n
     
     # Convert to data.frame 
     return(list(pseudobulk_tmm_matrix = as.data.frame(pseudobulk_tmm_matrix), 
-                var_df = as.data.frame(var_df)))
+                var_df = as.data.frame(var_df), counts = count_data_out))
 }

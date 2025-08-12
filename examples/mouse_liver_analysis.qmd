@@ -48,26 +48,23 @@ cluster_phis = list()
 for(cell_type in unique(seurat_obj$seurat_clusters)){
 print(paste("Analyzing", cell_type))
 cluster = subset(seurat_obj, subset = seurat_clusters == cell_type)
-# vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
-# means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
-# plot(log(means), log(vars))
 
-# tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 10)
-tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 2, normalize = F)
+tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
 
-#Get Pseudobulk and variance for each gene for each subject
 pb_mat = tmp[[1]]
 var_mat = tmp[[2]]
+counts = tmp[[3]]
 
-tmp2 = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 2, normalize = T)
+#Variance of NB is var = mean + mean^2*theta
+#rearrange to solve for theta = (var-mean)/mean^2
+time_wise_theta_meas <- as.data.frame(mapply(function(v,m){(v-m)/m^2}, var_mat, pb_mat))
+rownames(time_wise_theta_meas) = rownames(pb_mat)
+colnames(time_wise_theta_meas) = paste0(colnames(time_wise_theta_meas), "_theta_meas")
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
 
-pb_mat2 = tmp2[[1]]
-var_mat2 = tmp2[[2]]
-
-cors = c()
-for(i in 1:nrow(pb_mat2)){
-  cors = c(cors, cor(unlist(pb_mat2[i,]), unlist(pb_mat[i,])))
-}
 
 #Recover time in hours that sample was collected
 matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
@@ -80,365 +77,45 @@ if(length(unique(diff(ZT))) != 1 || length(unique(ZT)) < 6){
 
 #Call cosinor regression methods, where phases of variance wave are NOT fixed:
 pb_cycling = is_cycling(ZT, pb_mat)
-pb_cycling2 = is_cycling(ZT, pb_mat2)
 
-pb_cycling_tmm_filt = filter(pb_cycling2, as.numeric(p_statistic)<0.05)
-pb_cycling_raw_filt = filter(pb_cycling, as.numeric(p_statistic)<0.05)
-
-ggvenn::ggvenn(list("sig raw" = pb_cycling_raw_filt$Gene_Symbols,
-                    "sig tmm" = pb_cycling_tmm_filt$Gene_Symbols))
-merged_pb_cycling = merge(pb_cycling_tmm_filt, pb_cycling_raw_filt, by = "Gene_Symbols", suffixes = c("_tmm", "_raw"))
-plot(as.numeric(merged_pb_cycling$acrophase_bulk_tmm), as.numeric(merged_pb_cycling$acrophase_bulk_raw))
-# var_cyclers = var_cycling(ZT, var_mat, pb_mat)
-  
-#Get info to run var_cycling_fix_acro, where phases ARE fixed
 all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
 phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
-phase_pb2 = pb_cycling2 %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
-# circ_genes = filter(pb_cycling, as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
-
 
 #hist(as.numeric(phase_pb))
 
-#Run cosinor regression on variance data, where phases are fixed.
-var_cyclers_fixed = var_cycling_fix_acro(ZT, var_mat, pb_mat, phase_pb)
-var_cyclers_fixed2 = var_cycling_fix_acro(ZT, var_mat2, pb_mat2, phase_pb2)
-ggvenn::ggvenn(list("sig RC" = var_cyclers_fixed$Gene_Symbols[as.numeric(var_cyclers_fixed$double_freq_p_statistic) < 0.05],
-                    "sig tmm" = var_cyclers_fixed2$Gene_Symbols[as.numeric(var_cyclers_fixed2$double_freq_p_statistic) < 0.05]))
-
-
 var_cyclers = var_cycling(ZT, var_mat, pb_mat, phase_pb)
-var_cyclers2 = var_cycling(ZT, var_mat2, pb_mat2, phase_pb2)
-
-var_cyclers_raw_filt = filter(var_cyclers, as.numeric(full_model_AIC)<as.numeric(partial_model_AIC))
-var_cyclers_tmm_filt = filter(var_cyclers2, as.numeric(full_model_AIC)<as.numeric(partial_model_AIC))
-ggvenn::ggvenn(list("sig raw" = var_cyclers_raw_filt$Gene_Symbols,
-                    "sig tmm" = var_cyclers_tmm_filt$Gene_Symbols))
-
-merged_var_cyclers = merge(var_cyclers_raw_filt, var_cyclers_tmm_filt, by = "Gene_Symbols", suffixes = c("_raw", "_tmm"))
-plot(as.numeric(merged_var_cyclers$double_freq_acrophase_raw), as.numeric(merged_var_cyclers$double_freq_acrophase_tmm))
-
-##Run metacycle to find pb and variance rhythms:
-#meta2d_res = cycling_meta2d(ZT, var_mat, pb_mat, out_file_circ = "input_12hr.txt", out_file_mean = "input_24hr.txt", out_file_pb = "input_pb.txt",out_dir = "~/Desktop/test/")
-
-# #collect the results from metacycle:
-# doub_cyclers_meta2d = meta2d_res[[1]]
-# fund_cycling_meta2d = meta2d_res[[2]] %>% rename(fund_amp = fund_amplitude)
-# pb_cyclers_meta2d = meta2d_res[[3]] %>% mutate(acrophase_bulk = acrophase_bulk*pi/12)
-
-# #Below we create a dataframe of metacycle results comparable to var_cyclers
-# var_cycling_meta2d_res = merge(doub_cyclers_meta2d, fund_cycling_meta2d , by = "Gene_Symbols", all = TRUE) %>% mutate(double_freq_acrophase =double_freq_acrophase*pi/12 ) %>% mutate(fund_acro = fund_acrophase *pi/12)
-  
-#How do the meta2d vs cosinor results compare?##########
-# merge(pb_cycling, pb_cyclers_meta2d, by = "Gene_Symbols", suffixes = c("_cos","_meta" )) %>%
-#   filter(p_statistic_cos < 0.05 & p_statistic_meta < 0.05)%>%
-# ggplot()+
-#   geom_point(aes((as.numeric(amplitude_bulk_cos)),as.numeric(amplitude_bulk_meta)))+ylim(c(0,2*pi))+xlim(c(0,2*pi))
-# 
-# merge(var_cyclers, var_cycling_meta2d_res, by = "Gene_Symbols", suffixes = c("_cos","_meta" )) %>%
-#   filter(double_freq_p_statistic_cos < 0.1 & double_freq_p_statistic_meta < 0.1)%>%
-# ggplot()+
-#   geom_point(aes((as.numeric(double_freq_amplitude_cos)),as.numeric(double_freq_amplitude_meta)))#+ylim(c(0,pi))+xlim(c(0,pi))
-############################################
-
-# phi_meta2d = Orpheus::calc_phi(ZT, pb_cycling_results = pb_cycling, var_cycling_results = var_cycling_meta2d_res, var_p_thr = .05, expected_acrodiff_thr = .5, bulk_amp_thr = 0.2)
-# expected_acrodiff_thr = 0.785
-# input_meta2d = var_cycling_meta2d_res %>%
-#   left_join(pb_cycling, by = "Gene_Symbols") %>%
-#      mutate(across(-Gene_Symbols, as.numeric)) %>%
-#      filter(p_statistic < 0.05) %>%
-#      mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-#      mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
-#      dplyr::select(Gene_Symbols, double_freq_amplitude,var_mesor,amplitude_bulk, mesor_bulk, fund_amp,  everything()) %>%
-#      filter(amplitude_bulk >= 0.5) %>%
-#      column_to_rownames("Gene_Symbols")
-
-#hist(input_meta2d$acrodiff, main = "Meta2d acrodiff")
- 
-# phi_meta2d = input_meta2d %>%
-#   apply(., 1, function(row) {
-#     Orpheus::find_analytic(row[1], row[2], row[3], row[4])
-#   }) %>%
-#   t %>%
-#   as.data.frame
-# colnames(phi_meta2d) = c("G_pred", "Ac_pred", "phi")
-# print(paste0("meta2d: ", sum(!is.nan(phi_meta2d$phi)), "/",nrow(input_meta2d), " phi's not nan"  ))
-# 
-# print(paste0("meta2d: ", sum(input_meta2d$keep_acrodiff), "/",nrow(input_meta2d), " have double freq acro within 0.785 rads of pi/2"  ))
-# output_meta2d = merge(phi_meta2d, input_meta2d, by = 0)
-
-# plot_rhythms(ZT, var_mat2, pb_mat2, plot_me = c("Klf9", "Fam107b", "Rgs16", "Rorc", "A1cf", "Agxt"), time_units = "hrs")
-
-#### cosinor results 1 ###
 input_cos = var_cyclers %>% 
-    left_join(pb_cycling, by="Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    # filter(p_statistic < 0.05) %>%
-    filter(full_model_BIC_pb < partial_model_BIC_pb)%>%
-    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
-    filter(amplitude_bulk >= 0.5) %>%
-    column_to_rownames("Gene_Symbols")%>%
-    # filter(partial_model_AIC > full_model_AIC)
-    filter(partial_model_BIC_var > full_model_BIC_var)
-
-hist(input_cos$acrodiff, main = paste(cell_type, "raw counts, free cosinor acrodiffs"))
-
-  # Calculate phi parameters
-phi_cos = input_cos %>%
-  apply(., 1, function(row) {
-    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
-  }) %>%
-  t %>%
-  as.data.frame
-colnames(phi_cos) = c("G_pred", "Ac_pred", "theta", "phi")
-print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos$phi)), "/",nrow(input_cos), " phi's not nan"  ))
-
-# phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
-
-output_cos_raw = merge(phi_cos, input_cos, by = 0)
-
-
-plot_df = merge(input_cos, phi_cos, by = 0)
-
-theta = 1
-# Prepare data for the line
-x_line_values <- seq(0, max(plot_df$amplitude_bulk), by = 0.1)
-# y_line_values <- -x_line_values^2 * (exp(1)^9 - 1 - theta) / (2*exp(1)^9)
-# y_lines_values2 <- -(theta/2)*x_line_values^2
-# y_line_values = -.5*exp(-2^2)*x_line_values^2*(exp(2^2)-theta - 1)
-y_line_lb <- -(theta/2)*x_line_values^2
-y_line_ub <- .5*x_line_values^2
-line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
-
-# Create the ggplot
-# library(ggplot2)
-# ggplot() +
-#   geom_point(
-#     data = plot_df,
-#     aes(x = amplitude_bulk, y = double_freq_amplitude)
-#   ) +
-#   geom_line(
-#     data = line_data,
-#     aes(x = x, y = y1),
-#     color = "blue", 
-#     linewidth = 1   
-#   ) +
-#   geom_line(
-#     data = line_data,
-#     aes(x = x, y = y2),
-#     color = "blue", 
-#     linewidth = 1   
-#   ) +
-#   coord_cartesian() +
-#   labs(
-#     x = "Amplitude bulk",
-#     y = "Double Frequency Amplitude (input$double_freq_amplitude)"
-#   ) +
-#   theme_minimal()+
-#   scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
-
-#### cosinor results tmm values ####
-input_cos_tmm = var_cyclers2 %>% 
-    left_join(pb_cycling2, by="Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    # filter(p_statistic < 0.05) %>%
-    filter(full_model_BIC_pb < partial_model_BIC_pb) %>%
-    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
-    filter(amplitude_bulk >= 0.5) %>%
-    column_to_rownames("Gene_Symbols")%>%
-    # filter(partial_model_AIC > full_model_AIC)
-    filter(partial_model_BIC_var > full_model_BIC_var)
-
-hist(input_cos_tmm$acrodiff, main = paste(cell_type, "tmm cosine free"))
-
-phi_cos_tmm = input_cos_tmm %>%
-  apply(., 1, function(row) {
-    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
-  }) %>%
-  t %>%
-  as.data.frame
-colnames(phi_cos_tmm) = c("G_pred", "Ac_pred", "theta", "phi")
-print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_tmm$phi)), "/",nrow(input_cos_tmm), " phi's not nan"  ))
-
-# phi_tmm = calc_phi(pb_cycling2, var_cyclers2, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
-
-output_cos_tmm = merge(phi_cos_tmm, input_cos_tmm, by = 0)
-
-plot_df = merge(input_cos_tmm, phi_cos_tmm, by = 0)
-
-theta = 1
-# Prepare data for the line
-x_line_values <- seq(0, max(plot_df$amplitude_bulk), by = 0.1)
-# y_line_values <- -x_line_values^2 * (exp(1)^9 - 1 - theta) / (2*exp(1)^9)
-# y_lines_values2 <- -(theta/2)*x_line_values^2
-# y_line_values = -.5*exp(-2^2)*x_line_values^2*(exp(2^2)-theta - 1)
-y_line_lb <- -(theta/2)*x_line_values^2
-y_line_ub <- .5*x_line_values^2
-line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
-
-# Create the ggplot
-# library(ggplot2)
-# ggplot() +
-#   geom_point(
-#     data = plot_df,
-#     aes(x = amplitude_bulk, y = double_freq_amplitude)
-#   ) +
-#   geom_line(
-#     data = line_data,
-#     aes(x = x, y = y1),
-#     color = "blue", 
-#     linewidth = 1   
-#   ) +
-#   geom_line(
-#     data = line_data,
-#     aes(x = x, y = y2),
-#     color = "blue", 
-#     linewidth = 1   
-#   ) +
-#   coord_cartesian() +
-#   labs(
-#     x = "Amplitude bulk",
-#     y = "Double Frequency Amplitude (input$double_freq_amplitude)"
-#   ) +
-#   theme_minimal()+
-#   scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
-
-
-# phi_cos_tmm_filt = filter(phi_cos_tmm, !is.na(phi))
-# vars = sparseMatrixStats::rowVars(cluster@assays$RNA$counts)
-# means = sparseMatrixStats::rowMeans2(cluster@assays$RNA$counts)
-# theta_measured = (vars-means)/means^2
-# names(theta_measured) = rownames(cluster@assays$RNA$counts)
-# 
-# phi_cos_tmm_filt$theta_measured = theta_measured[match(rownames(phi_cos_tmm_filt), names(theta_measured))]
-# 
-# phi_cos$theta_measured = theta_measured[match(rownames(phi_cos), names(theta_measured))]
-
-#### cosinor results  (fixed acrophase) ###
-input_cos_fix = var_cyclers_fixed %>% 
     left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
-    # filter(p_statistic < 0.05) %>%
-    filter(full_model_BIC_pb < partial_model_BIC_pb) %>%
+    filter(p_statistic < 0.05) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
     dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
-    # filter(partial_model_AIC > full_model_AIC)
-    filter(partial_model_BIC_var > full_model_BIC_var)
+    filter(partial_model_AIC_var > full_model_AIC_var)
 
 
-  # Calculate phi parameters
-phi_cos_fix = input_cos_fix %>%
-  apply(., 1, function(row) {
-    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
-  }) %>%
-  t %>%
-  as.data.frame
-colnames(phi_cos_fix) = c("G_pred", "Ac_pred", "theta", "phi")
-print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix$phi)), "/",nrow(input_cos_fix), " phi's not nan"  ))
+phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
-# phi_fix = calc_phi(pb_cycling, var_cyclers_fixed, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
-
-output_cos_fix_raw = merge(phi_cos_fix, input_cos_fix, by = 0)
-
-plot_df = merge(input_cos_fix, phi_cos_fix, by = 0)
-
-theta = 1
-# Prepare data for the line
-x_line_values <- seq(0, max(plot_df$amplitude_bulk), by = 0.1)
-# y_line_values <- -x_line_values^2 * (exp(1)^9 - 1 - theta) / (2*exp(1)^9)
-# y_lines_values2 <- -(theta/2)*x_line_values^2
-# y_line_values = -.5*exp(-2^2)*x_line_values^2*(exp(2^2)-theta - 1)
-y_line_lb <- -(theta/2)*x_line_values^2
-y_line_ub <- .5*x_line_values^2
-line_data <- data.frame(x = x_line_values, y1 = y_line_lb, y2 = y_line_ub)
-
-# Create the ggplot
-# library(ggplot2)
-# ggplot() +
-#   geom_point(
-#     data = plot_df,
-#     aes(x = amplitude_bulk, y = double_freq_amplitude)
-#   ) +
-#   geom_line(
-#     data = line_data,
-#     aes(x = x, y = y1),
-#     color = "blue", 
-#     linewidth = 1   
-#   ) +
-#   geom_line(
-#     data = line_data,
-#     aes(x = x, y = y2),
-#     color = "blue", 
-#     linewidth = 1   
-#   ) +
-#   coord_cartesian() +
-#   labs(
-#     x = "Amplitude bulk",
-#     y = "Double Frequency Amplitude (input$double_freq_amplitude)"
-#   ) +
-#   theme_minimal()+
-#   scale_colour_gradient(low = "blue", high = "red", na.value = "black", limits = c(-.1, 1))
+output_cos_tmm = merge(phi, input_cos, by = 0)
+output = merge(output_cos_tmm, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
+output = merge(output, agg_theta_meas, by.x = "Row.names", by.y = 0)
 
 
-#### cosinor results fixed acrophase tmm ###
-input_cos_fix_tmm = var_cyclers_fixed2 %>% 
-    left_join(pb_cycling2, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    # filter(p_statistic < 0.05) %>%
-    filter(full_model_BIC_pb < partial_model_BIC_pb) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
-    filter(amplitude_bulk >= 0.5) %>%
-    column_to_rownames("Gene_Symbols")%>%
-    # filter(partial_model_AIC > full_model_AIC)
-    filter(partial_model_BIC_var > full_model_BIC_var)
-
-  # Calculate phi parameters
-phi_cos_fix_tmm = input_cos_fix_tmm %>%
-  apply(., 1, function(row) {
-    Orpheus::find_analytic(row[1], row[2], row[3], row[4])
-  }) %>%
-  t %>%
-  as.data.frame
-colnames(phi_cos_fix_tmm) = c("G_pred", "Ac_pred", "theta", "phi")
-print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos_fix_tmm$phi)), "/",nrow(input_cos_fix_tmm), " phi's not nan"  ))
-
-# phi_fix_tmm = calc_phi(pb_cycling2, var_cyclers_fixed2, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
-
- output_cos_fix_tmm = merge(phi_cos_fix_tmm, input_cos_fix_tmm, by = 0)
-
- 
- local_res =  list("free_raw" = output_cos_raw, "fix_raw" = output_cos_fix_raw, "free_tmm" = output_cos_tmm, "fix_tmm" = output_cos_fix_tmm)
- names(local_res) = paste(cell_type, names(local_res))
- cluster_phis <- append(cluster_phis, list(local_res))
+local_res =  list("tmm" = output)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
 
 }
 ```
 
 ```{r}
-cos_phis_raw <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
   current_df <- cluster_phis[[source_name]][[1]]
   current_df$Source <- names(cluster_phis[[source_name]][1])
   current_df
 }))
 
-cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-  current_df <- cluster_phis[[source_name]][[3]]
-  current_df$Source <- names(cluster_phis[[source_name]][3])
-  current_df
-}))
-
-# meta2d_phis <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-#   current_df <- cluster_phis[[source_name]][[3]]
-#   current_df$Source <- names(cluster_phis[[source_name]][3])
-#   current_df
-# }))
-
-
-cos_phis_raw_filt = filter(cos_phis_raw,!is.nan(phi))
-table(cos_phis_raw_filt$Source)
 
 cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
 table(cos_phis_tmm_filt$Source)
@@ -448,8 +125,247 @@ table(cos_phis_tmm_filt$Source)
 ```
 
 ```{r}
-boxplot(phi ~ Source, data = cos_phis_tmm_filt)
-boxplot(phi ~ Source, data = cos_phis_raw_filt)
+cos_phis_no_kupffer = filter(cos_phis_tmm_filt, Source != "kupffer cells")
+kruskal.test(phi ~ Source, data = cos_phis_no_kupffer)
+pairwise.wilcox.test(cos_phis_no_kupffer$phi, cos_phis_no_kupffer$Source, p.adjust.method = "BH")
+
+cos_phis_subset = filter(cos_phis_tmm_filt, Source != "kupffer cells" & Source != "cholangiocytes")
+kruskal.test(phi ~ Source, data = cos_phis_subset)
+pairwise.wilcox.test(cos_phis_subset$phi, cos_phis_subset$Source, p.adjust.method = "BH")
+
+custom_colors <- c("cholangiocytes" = "#F8766D", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#ABA300", "hepatocytes 2" = "#0CB702", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#8494FF", "periportal hepatocytes" = "#FF68A1")
+
+liver_phi_boxplot = ggplot(cos_phis_tmm_filt, aes(x = Source,y =  phi, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (rad)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/liver_phi_boxplot.pdf", liver_phi_boxplot, device = "pdf", width = 6, height = 5)
+
+
+liver_phi_boxplot2 = ggplot(cos_phis_subset, aes(x = Source,y =  phi, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (rad)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/liver_phi_boxplot_subset_celltypes.pdf", liver_phi_boxplot2, device = "pdf", width = 6, height = 5)
+
+```
+
+```{r}
+ggplot(cos_phis_tmm_filt, aes(x = Source,y =  Ac))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Predicted cellular amplitude")+
+  ylab("Cell type")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+ylim(0, 15)
+```
+
+```{r}
+acrodiff_compare = ggplot(cos_phis_no_kupffer, aes(x = acrodiff*12/pi)) +
+  geom_histogram(binwidth = 2, color = "black", fill = "steelblue") +
+  facet_wrap(~ as.factor(Source), scales = "free_y") +
+  xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
+  ylab("Count")+
+   theme_minimal()+
+  theme(
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )
+ggsave("~/Desktop/acrodiff_compare.pdf", plot = acrodiff_compare, device = "pdf", width = 7, height = 7)
+```
+
+```{r}
+gene_sets <- cos_phis_no_kupffer %>%
+  group_by(Source) %>%
+  summarise(genes = list(unique(Row.names))) %>%
+  deframe()
+
+peri_overlap = intersect(gene_sets$`pericentral hepatocytes`, gene_sets$`periportal hepatocytes`)
+
+peri_df = filter(cos_phis_no_kupffer, Source %in% c("pericentral hepatocytes","periportal hepatocytes" ) & Row.names %in% peri_overlap)
+
+pp_phi_compare = ggplot(peri_df, aes(x = Source,y =  phi*12/pi, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+ggsave("~/Desktop/periportal_vs_pericentral_phi_same_genes.pdf", pp_phi_compare, device = "pdf", width = 5, height = 5)
+
+pp_ac_compare = ggplot(peri_df, aes(x = Source,y =  Ac, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted cell rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+ggsave("~/Desktop/periportal_vs_pericentral_Ac_same_genes.pdf", pp_ac_compare, device = "pdf", width = 5, height = 5)
+
+pp_bulk_amp_compare = ggplot(peri_df, aes(x = Source,y =  amplitude_bulk, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Measured bulk rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/periportal_vs_pericentral_bulk_amp_same_genes.pdf", pp_bulk_amp_compare, device = "pdf", width = 5, height = 5)
+
+peri_test_df <- peri_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = Source, values_from = c(phi, Ac))
+
+wilcox.test(peri_test_df$`phi_periportal hepatocytes`, peri_test_df$`phi_pericentral hepatocytes`, paired = T)
+
+wilcox.test(peri_test_df$`Ac_periportal hepatocytes`, peri_test_df$`Ac_pericentral hepatocytes`, paired = T)
+
+############### hepatocytes ########
+hepa_overlap = intersect(gene_sets$`hepatocytes 1`, gene_sets$`hepatocytes 2`)
+
+hepa_df = filter(cos_phis_no_kupffer, Source %in% c("hepatocytes 1","hepatocytes 2" ) & Row.names %in% hepa_overlap)
+
+hepa_phi_compare = ggplot(hepa_df, aes(x = Source,y =  phi*12/pi, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_phi.pdf", hepa_phi_compare, device = "pdf", width = 5, height = 5)
+
+hepa_ac_compare = ggplot(hepa_df, aes(x = Source,y =  Ac, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted cell rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_Ac.pdf", hepa_ac_compare, device = "pdf", width = 5, height = 5)
+
+hepa_bulk_amp_compare = ggplot(hepa_df, aes(x = Source,y =  amplitude_bulk, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Measured bulk rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_bulk_amp.pdf", hepa_bulk_amp_compare, device = "pdf", width = 5, height = 5)
+
+hepa_test_df <- hepa_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = Source, values_from = c(phi, Ac))
+
+wilcox.test(hepa_test_df$`phi_hepatocytes 1`, hepa_test_df$`phi_hepatocytes 2`, paired = T)
+
+wilcox.test(hepa_test_df$`Ac_hepatocytes 1`, hepa_test_df$`Ac_hepatocytes 2`, paired = T)
+
+
+
+```
+
+```{r}
+theta_plot= ggplot(cos_phis_no_kupffer, aes(x = coarse_theta, y = theta)) +
+  geom_point() +
+  facet_wrap(~ Source, scales = "free_y") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  xlim(c(-0.1, 2))+
+  ylim(c(-0.1, 2))+
+  theme(
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    legend.title = element_text(size = 12)
+  )+
+  xlab("Measured theta across timepoints")+
+  ylab("Predicted theta")
+
+ggsave("~/Desktop/theta_measured_v_pred.pdf", theta_plot, device = "pdf", width = 6.5, height = 5)
+
 ```
 
 Write rnk files:

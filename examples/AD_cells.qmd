@@ -23,29 +23,30 @@ seurat_obj_ctl$orig.ident = seurat_obj_ctl$individualID
 ```
 
 ```{r}
-tmp = Orpheus::extract_clstr_prep_input_tmm(seurat_obj_ctl, cluster_id = "0", clip_sd = 10, top_n_genes = 15e3, cells_threshold = 10, normalize = T)
+tmp = Orpheus::extract_clstr_prep_input(seurat_obj_ctl, cluster_id = "0", clip_sd = 15, top_n_genes = 15e3, cells_threshold = 10, normalize = T)
 
 
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
+pb_mat_ctl = tmp[[1]]
+var_mat_ctl = tmp[[2]]
 
-times = seurat_obj_ctl$times[match(colnames(pb_mat), seurat_obj_ctl$individualID)] %>% unname %>% unlist
+times_ctl = seurat_obj_ctl$times[match(colnames(pb_mat_ctl), seurat_obj_ctl$individualID)] %>% unname %>% unlist
 
 
-pb_cycling = is_cycling(times, pb_mat, time_units = "rad")
-all(pb_cycling$Gene_Symbols == rownames(var_mat))
+pb_cycling = is_cycling(times_ctl, pb_mat_ctl, time_units = "rad")
+all(pb_cycling$Gene_Symbols == rownames(var_mat_ctl))
 pb_phases = as.numeric(pb_cycling$acrophase_bulk)
-var_cyclers = var_cycling(times, var_mat, pb_mat,phase_pb = pb_phases, time_units = "rad")
+var_cyclers = var_cycling(times_ctl, var_mat_ctl, pb_mat_ctl,phase_pb = pb_phases, time_units = "rad")
 
 
 input_cos = var_cyclers %>% 
-    left_join(pb_cycling, by = "Gene_Symbols") %>%
+    left_join(pb_cycling, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
     filter(p_statistic < 0.05) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC > full_model_AIC)
+    filter(partial_model_AIC_var > full_model_AIC_var)
 
   # Calculate phi parameters
 phi_cos = input_cos %>%
@@ -57,8 +58,7 @@ phi_cos = input_cos %>%
 colnames(phi_cos) = c("G_pred", "Ac_pred", "theta", "phi")
 print(paste0("cosinor fixed acro: ", sum(!is.nan(phi_cos$phi)), "/",nrow(input_cos), " phi's not nan"  ))
 
-phi == phi_cos
-
+phi = calc_phi(pb_cycling, var_cyclers)
 
 plot_df = merge(input_cos, phi_cos, by = 0)
 
@@ -108,7 +108,7 @@ M = cor(phi_ctl_filt)
 library(ggcorrplot)
 ggcorrplot(M, method = "square", type = "upper", title = "CTL exc3.5", lab = T)
 
-phi_ctl_filt %>% rownames_to_column(var  = "Row.names") %>% arrange(phi) %>% select(Row.names, phi) %>% write.table(., "~/Desktop/ctl_exc35_phi.rnk", row.names = F, col.names = F, quote = F, sep = '\t')
+# phi_ctl_filt %>% rownames_to_column(var  = "Row.names") %>% arrange(phi) %>% select(Row.names, phi) %>% write.table(., "~/Desktop/ctl_exc35_phi.rnk", row.names = F, col.names = F, quote = F, sep = '\t')
 ```
 
 ```{r}
@@ -120,29 +120,29 @@ seurat_obj_ad = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F,
 seurat_obj_ad$seurat_clusters = "0"
 seurat_obj_ad$orig.ident = seurat_obj_ad$individualID
 
-tmp = Orpheus::extract_clstr_prep_input_tmm(seurat_obj_ad, cluster_id = "0", clip_sd = 10, top_n_genes = 15e3, cells_threshold = 10, normalize = T)
+tmp = Orpheus::extract_clstr_prep_input(seurat_obj_ad, cluster_id = "0", clip_sd = 15, top_n_genes = 15e3, cells_threshold = 10, normalize = T)
 
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
+pb_mat_ad = tmp[[1]]
+var_mat_ad = tmp[[2]]
 
-times = seurat_obj_ad$times[match(colnames(pb_mat), seurat_obj_ad$individualID)] %>% unname %>% unlist
+times_ad = seurat_obj_ad$times[match(colnames(pb_mat_ad), seurat_obj_ad$individualID)] %>% unname %>% unlist
 
 
-pb_cycling_ad = is_cycling(times, pb_mat, time_units = "rad")
+pb_cycling_ad = is_cycling(times_ad, pb_mat_ad, time_units = "rad")
 
-all(pb_cycling_ad$Gene_Symbols == rownames(var_mat))
+all(pb_cycling_ad$Gene_Symbols == rownames(var_mat_ad))
 pb_phases = as.numeric(pb_cycling_ad$acrophase_bulk)
-var_cyclers_ad = var_cycling(times, var_mat, pb_mat,phase_pb = pb_phases, time_units = "rad")
+var_cyclers_ad = var_cycling(times_ad, var_mat_ad, pb_mat_ad,phase_pb = pb_phases, time_units = "rad")
 
 input_cos_ad = var_cyclers_ad %>% 
-    left_join(pb_cycling_ad, by = "Gene_Symbols") %>%
+    left_join(pb_cycling_ad, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
     filter(p_statistic < 0.05) %>%
     mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, partial_model_AIC, full_model_AIC,  everything()) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
     filter(amplitude_bulk >= 0.5) %>%
     column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC > full_model_AIC)
+    filter(partial_model_AIC_var > full_model_AIC_var)
 
 phi_ad = Orpheus::calc_phi(pb_cycling_results = pb_cycling_ad, var_cycling_results = var_cyclers_ad, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
 
@@ -155,9 +155,9 @@ M = cor(phi_ad_filt)
 library(ggcorrplot)
 ggcorrplot(M, method = "square", type = "upper", title = "CTL exc3.5", lab = T)
 
-phi_ad_filt %>% rownames_to_column(var  = "Row.names") %>% arrange(phi) %>% select(Row.names, phi) %>% write.table(., "~/Desktop/ad_exc35_phi.rnk", row.names = F, col.names = F, quote = F, sep = '\t')
+# phi_ad_filt %>% rownames_to_column(var  = "Row.names") %>% arrange(phi) %>% select(Row.names, phi) %>% write.table(., "~/Desktop/ad_exc35_phi.rnk", row.names = F, col.names = F, quote = F, sep = '\t')
 
-plot_rhythms(times, var_mat, pb_mat, plot_me = c("RPL13","RPL13A","RPL15",
+plot_rhythms(times_ad, var_mat_ad, pb_mat_ad, plot_me = c("RPL13","RPL13A","RPL15",
         "RPL17","RPL18","RPL23","RPL28","RPL29","RPL3","RPL38",
         "RPL4","RPS11","RPS16","RPS23","RPS25","RPS27","RPS28",
         "RPS6KA2","RPS6KA5","RPS8","RPSA"), time_units = "rads")
@@ -174,9 +174,8 @@ boxplot(merged_phi$phi_CTL, merged_phi$phi_AD)
 ```
 
 ```{r}
-batch_bin_ad = seurat_obj_ad$batch_bin[match(colnames(pb_mat), seurat_obj_ad$individualID)] %>% unname %>% unlist
 
-is_cycling_custom <- function(times, pb_mat,batches, time_units = "hrs") {
+is_cycling_custom <- function(times, pb_mat,meta_data, time_units = "hrs") {
   `%do%` <- foreach::`%do%`
   cat(paste("\nRunning is_cycling()"))
   gene1 = t(pb_mat)  # get the transpose, subjects x genes and put in order of CYCLOPS order
@@ -187,14 +186,29 @@ is_cycling_custom <- function(times, pb_mat,batches, time_units = "hrs") {
     cat(paste("\nRunning regression assuming times are 0-2pi radians"))
     times1 = times
   }
-  batches = as.factor(batches)
-  #loop:
+  batches = meta_data$batch_bin[match(colnames(pb_mat), meta_data$individualID)] %>% unname %>% unlist %>% as.factor()
+  pmi = meta_data$pmi[match(colnames(pb_mat), meta_data$individualID)] %>% unname %>% unlist %>% as.numeric
+  sex = meta_data$sex[match(colnames(pb_mat), meta_data$individualID)] %>% unname %>% unlist %>% as.factor()
+
+    #loop:
   all_genes = foreach (gene_i = 1:ncol(gene1), .combine = rbind) %do%{
     gexp1 = as.numeric(unlist(gene1[,gene_i]))
+    Gene_Symbols = colnames(gene1)[gene_i]
+    # Check for all zeros or zero variance
+    if (all(gexp1 == 0) || sd(gexp1) == 0) {
+      # Return NA row for this gene
+      return(c(Gene_Symbols, rep(NA, 7))) # 9 columns to match the number of outputs
+    }
     
-    partial_model = lm(gexp1 ~ batches)
-    full_model = lm(gexp1 ~ sin(times1) + cos(times1)+batches )
-    design_matrix <- model.matrix(gexp1 ~ sin(times1) + cos(times1)+batches)
+    partial_model = lm(gexp1 ~ batches+pmi+sex)
+    partial_model_AIC = AIC(partial_model)
+    partial_model_BIC = BIC(partial_model)
+    
+    full_model = lm(gexp1 ~ sin(times1) + cos(times1)+batches+pmi+sex )
+    full_model_AIC = AIC(full_model)
+    full_model_BIC = BIC(full_model)
+    
+    design_matrix <- model.matrix(gexp1 ~ sin(times1) + cos(times1)+batches+pmi+sex)
     
     anova_results = anova(partial_model, full_model)
     sin_coff = full_model[["coefficients"]][["sin(times1)"]]
@@ -202,16 +216,18 @@ is_cycling_custom <- function(times, pb_mat,batches, time_units = "hrs") {
     acrophase_bulk = atan2(sin_coff, cos_coeff) %% (2*pi)
     
     p_statistic = anova_results$`Pr(>F)`[2]
-    Gene_Symbols = colnames(gene1)[gene_i]
     amplitude_bulk = sqrt(sin_coff^2 + cos_coeff^2)
     
-    mesor_bulk = full_model$coefficients[["(Intercept)"]]
+    mesor_bulk = mean(design_matrix[,-c(2, 3)] %*% full_model[["coefficients"]][-c(2, 3)]) 
+    # mesor_bulk = full_model$coefficients[["(Intercept)"]]
     
     amp_ratio = amplitude_bulk / mesor_bulk
     
     
     
-    gene_summary = cbind( Gene_Symbols, acrophase_bulk,amplitude_bulk, p_statistic, amp_ratio, sin_coff, cos_coeff, mesor_bulk)
+   gene_summary = cbind( Gene_Symbols, acrophase_bulk,amplitude_bulk,
+              p_statistic, amp_ratio, sin_coff, cos_coeff, mesor_bulk,
+              partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC)
     
     return(gene_summary)
     
@@ -223,7 +239,7 @@ is_cycling_custom <- function(times, pb_mat,batches, time_units = "hrs") {
   
 }
 
-var_cycling_custom <- function(times, var_mat, mean_mat, time_units = "hrs") {
+var_cycling_custom <- function(times, var_mat, mean_mat, phase_pb,meta_data, time_units = "hrs") {
   `%do%` <- foreach::`%do%`
   cat(paste("\nRunning var_cycling()"))
   gene1 = t(var_mat)  # get the transpose, subjects x genes and put in order of CYCLOPS order
@@ -235,15 +251,33 @@ var_cycling_custom <- function(times, var_mat, mean_mat, time_units = "hrs") {
     cat(paste("\nRunning regression assuming times are 0-2pi radians"))
     times1 = times
   }
+  batches = meta_data$batch_bin[match(colnames(pb_mat), meta_data$individualID)] %>% unname %>% unlist %>% as.factor()
+  pmi = meta_data$pmi[match(colnames(pb_mat), meta_data$individualID)] %>% unname %>% unlist %>% as.numeric
+  sex = meta_data$sex[match(colnames(pb_mat), meta_data$individualID)] %>% unname %>% unlist %>% as.factor()
   
   #loop:
   all_genes = foreach (gene_i = 1:ncol(gene1), .combine = rbind) %do%{
     gexp1 = as.numeric(unlist(gene1[,gene_i]))
     m1 = as.numeric(unlist(means1[, gene_i]))
+    Gene_Symbols = colnames(gene1)[gene_i]
+    phase_bulk = as.numeric(phase_pb[gene_i])
+
+
+    # Check for all zeros or zero variance
+    if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
+      # Return NA row for this gene
+      return(c(Gene_Symbols, rep(NA, 8))) # 9 columns to match the number of outputs
+    }
     
-    partial_model = lm(gexp1 ~ m1)
-    full_model = lm(gexp1 ~ sin(2*times1) + cos(2*times1) + m1)
-    design_matrix <- model.matrix(gexp1 ~ sin(2*times1) + cos(2*times1) + m1)
+    partial_model = lm(gexp1 ~ m1 + batches+sex+pmi)
+    partial_model_AIC = AIC(partial_model)
+    partial_model_BIC = BIC(partial_model)
+
+    full_model = lm(gexp1 ~ sin(2*times1) + cos(2*times1) + m1 + batches+pmi+sex)
+    full_model_AIC = AIC(full_model)
+    full_model_BIC = BIC(full_model)
+
+    design_matrix <- model.matrix(gexp1 ~ sin(2*times1) + cos(2*times1) + m1+ batches+pmi+sex)
     
     anova_results = anova(partial_model, full_model)
     sin_coff = full_model[["coefficients"]][["sin(2 * times1)"]]
@@ -257,13 +291,34 @@ var_cycling_custom <- function(times, var_mat, mean_mat, time_units = "hrs") {
     
     
     double_freq_p_statistic = anova_results$`Pr(>F)`[2]
-    Gene_Symbols = colnames(gene1)[gene_i]
-    double_freq_amplitude = sqrt(sin_coff^2 + cos_coeff^2)
+    raw_2w_amp = sqrt(sin_coff^2 + cos_coeff^2)
+
+    # #Calculate the 95% CI for double frequency phase
+    # if(double_freq_amplitude > 1e-3){
+    #   ## Extract coefficients and covariance ---------------
+    #   b  <- coef(full_model)["cos(2 * times1)"]   # β̂
+    #   g  <- coef(full_model)["sin(2 * times1)"]   # γ̂
+    #   V  <- vcov(full_model)[c("cos(2 * times1)","sin(2 * times1)"),
+    #                   c("cos(2 * times1)","sin(2 * times1)")]
+
+    #   ## SE via delta method -------------------------------
+    #   var.phi <- (g^2*V[1,1] + b^2*V[2,2] - 2*b*g*V[1,2]) / (b^2+g^2)^2
+    #   se.phi  <- sqrt(var.phi)
+    #   ## 95 % CI (in radians) ------------------------------
+    #   phi.hat <- atan2(g, b)
+    #   ci.phi  <- phi.hat + c(-1, 1)*qnorm(0.975)*se.phi
+    # }
     
+    #Amp of double frequency variance wave projected onto expected bulk wave.
+    double_freq_amplitude = -cos_coeff * cos(2 * phase_bulk) - sin_coff * sin(2 * phase_bulk)
+
     #MESOR or mean of the fitted variance wave
     var_mesor = mean( full_model$fitted.values)
+    # var_mesor = mean(design_matrix[,-c(2, 3)] %*% full_model[["coefficients"]][-c(2, 3)]) 
 
-    gene_summary = cbind( Gene_Symbols, double_freq_acrophase, double_freq_amplitude, double_freq_p_statistic, fund_amp, fund_acro, var_mesor)
+    gene_summary = cbind( Gene_Symbols, double_freq_acrophase, double_freq_amplitude,
+          double_freq_p_statistic, fund_amp, fund_acro, var_mesor,
+          partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC, raw_2w_amp)
     
     
     
@@ -278,48 +333,59 @@ var_cycling_custom <- function(times, var_mat, mean_mat, time_units = "hrs") {
 }
 ```
 
+Use custom functions from above:
+
 ```{r}
+meta_ad = seurat_obj_ad@meta.data
+meta_ctl = seurat_obj_ctl@meta.data
+
+pb_cycling_ad_custom = is_cycling_custom(times_ad, pb_mat_ad, meta_ad, time_units = "rads")
+pb_cycling_ctl_custom = is_cycling_custom(times_ctl, pb_mat_ctl, meta_ctl, time_units = "rads")
+
+#Test how different answers are
+# test = merge(pb_cycling_ad_custom, pb_cycling_ad, by = "Gene_Symbols", suffixes = c("_cust", "_orig")) %>% filter(as.numeric(p_statistic_cust) < 0.05 & as.numeric(p_statistic_orig) < 0.05)
+# plot(test$amp_ratio_cust, test$amp_ratio_orig)
 
 ```
 
 ```{r}
-# Pivot wider
-var_matrix <- sub_var %>%
-  select(gene,projid, variance) %>%
-  pivot_wider(names_from = projid, values_from = variance) %>% column_to_rownames(var = "gene")
-
-mean_matrix <- sub_var %>%
-  select(gene,projid, mean) %>%
-  pivot_wider(names_from = projid, values_from = mean) %>% column_to_rownames(var = "gene")
-mean_matrix = mean_matrix[,colnames(var_matrix)]
-
-headers = mutate(metadata, batch = case_when(
-    batch_bin == "[10,64)" ~ "0",
-    batch_bin == "[4,10)" ~ "1",
-    TRUE ~ batch_bin  # Keep other values unchanged
-  )) %>% select(projid, cond_cogdx, pmi, msex, batch) %>% rename(sex_D = msex, cond_D = cond_cogdx, batch_D = batch, pmi_C = pmi) %>% column_to_rownames(var = "projid") %>%  mutate(across(-pmi_C, ~ paste0("cond_", .))) %>% t %>% as.data.frame
-
-headers = headers[,colnames(var_matrix)]
-stopifnot(all(colnames(headers) == colnames(var_matrix)))
-
-var_mat = rbind(headers, var_matrix) %>% rownames_to_column(var = "Gene_Symbols")
-
-stopifnot(all(colnames(mean_matrix) == colnames(var_mat)[-1]))
+# # Pivot wider
+# var_matrix <- sub_var %>%
+#   select(gene,projid, variance) %>%
+#   pivot_wider(names_from = projid, values_from = variance) %>% column_to_rownames(var = "gene")
+# 
+# mean_matrix <- sub_var %>%
+#   select(gene,projid, mean) %>%
+#   pivot_wider(names_from = projid, values_from = mean) %>% column_to_rownames(var = "gene")
+# mean_matrix = mean_matrix[,colnames(var_matrix)]
+# 
+# headers = mutate(metadata, batch = case_when(
+#     batch_bin == "[10,64)" ~ "0",
+#     batch_bin == "[4,10)" ~ "1",
+#     TRUE ~ batch_bin  # Keep other values unchanged
+#   )) %>% select(projid, cond_cogdx, pmi, msex, batch) %>% rename(sex_D = msex, cond_D = cond_cogdx, batch_D = batch, pmi_C = pmi) %>% column_to_rownames(var = "projid") %>%  mutate(across(-pmi_C, ~ paste0("cond_", .))) %>% t %>% as.data.frame
+# 
+# headers = headers[,colnames(var_matrix)]
+# stopifnot(all(colnames(headers) == colnames(var_matrix)))
+# 
+# var_mat = rbind(headers, var_matrix) %>% rownames_to_column(var = "Gene_Symbols")
+# 
+# stopifnot(all(colnames(mean_matrix) == colnames(var_mat)[-1]))
 
 ```
 
 ```{r}
-library(doParallel)
-phase_spread_ctl = is_cycling(cyc_preds, var_mat, mean_matrix, "cond_0", useBatch = T)
-phase_spread_ctl$p_statistic = as.numeric(phase_spread_ctl$p_statistic)
-
-ctl_rnk = phase_spread_ctl %>% mutate(metric = -log(as.numeric(p_statistic))) %>% select(Gene_Symbols, metric)
-write.table(ctl_rnk, "~/Desktop/exc35_ctl_phase_spread_pVal.rnk", sep = "\t", row.names = F, col.names = F)
-
-phase_spread_ad = is_cycling(cyc_preds, var_mat, mean_matrix, "cond_1", useBatch = T)
-phase_spread_ad$p_statistic = as.numeric(phase_spread_ad$p_statistic)
-ad_rnk = phase_spread_ad %>% mutate(metric = -log(as.numeric(p_statistic))) %>% select(Gene_Symbols, metric)
-write.table(ad_rnk, "~/Desktop/exc35_ad_phase_spread_pVal.rnk", sep = "\t", row.names = F, col.names = F)
+# library(doParallel)
+# phase_spread_ctl = is_cycling(cyc_preds, var_mat, mean_matrix, "cond_0", useBatch = T)
+# phase_spread_ctl$p_statistic = as.numeric(phase_spread_ctl$p_statistic)
+# 
+# ctl_rnk = phase_spread_ctl %>% mutate(metric = -log(as.numeric(p_statistic))) %>% select(Gene_Symbols, metric)
+# write.table(ctl_rnk, "~/Desktop/exc35_ctl_phase_spread_pVal.rnk", sep = "\t", row.names = F, col.names = F)
+# 
+# phase_spread_ad = is_cycling(cyc_preds, var_mat, mean_matrix, "cond_1", useBatch = T)
+# phase_spread_ad$p_statistic = as.numeric(phase_spread_ad$p_statistic)
+# ad_rnk = phase_spread_ad %>% mutate(metric = -log(as.numeric(p_statistic))) %>% select(Gene_Symbols, metric)
+# write.table(ad_rnk, "~/Desktop/exc35_ad_phase_spread_pVal.rnk", sep = "\t", row.names = F, col.names = F)
 
 
 ```
@@ -327,14 +393,14 @@ write.table(ad_rnk, "~/Desktop/exc35_ad_phase_spread_pVal.rnk", sep = "\t", row.
 Take the most significant above, are the acrophases of that list +-pi/2 from the cycling genes?
 
 ```{r}
-cycling_genes_CTL = read_csv("../scROSMAP_project/Cyclops_ordering/downstream_output_Exc3_5/cosinor_results_CTL.csv")
-
-ctl_df = merge(phase_spread_ctl, cycling_genes_CTL,by = "Gene_Symbols",  suffixes = c("_Phase_spread", "_genes")) %>% filter(BHQ_Phase_spread < 0.05)
-
-# hist( as.numeric(ctl_df$acrophase_genes), col=rgb(0,0,1,1/4))  # first histogram
-# hist( as.numeric(ctl_df$acrophase_Phase_spread), col=rgb(1,0,0,1/4), add=T)  # second
-
-hist(abs(as.numeric(ctl_df$acrophase_Phase_spread) - as.numeric(ctl_df$acrophase_genes)) )
+# cycling_genes_CTL = read_csv("../scROSMAP_project/Cyclops_ordering/downstream_output_Exc3_5/cosinor_results_CTL.csv")
+# 
+# ctl_df = merge(phase_spread_ctl, cycling_genes_CTL,by = "Gene_Symbols",  suffixes = c("_Phase_spread", "_genes")) %>% filter(BHQ_Phase_spread < 0.05)
+# 
+# # hist( as.numeric(ctl_df$acrophase_genes), col=rgb(0,0,1,1/4))  # first histogram
+# # hist( as.numeric(ctl_df$acrophase_Phase_spread), col=rgb(1,0,0,1/4), add=T)  # second
+# 
+# hist(abs(as.numeric(ctl_df$acrophase_Phase_spread) - as.numeric(ctl_df$acrophase_genes)) )
 ```
 
 ```{r}

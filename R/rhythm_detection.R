@@ -160,7 +160,8 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     double_freq_amplitude = -cos_coeff * cos(2 * phase_bulk) - sin_coff * sin(2 * phase_bulk)
 
     #MESOR or mean of the fitted variance wave
-    var_mesor = mean( full_model$fitted.values)
+    # var_mesor = mean( full_model$fitted.values)
+    var_mesor = mean(design_matrix[,-c(2, 3)] %*% full_model[["coefficients"]][-c(2, 3)])
 
     gene_summary = cbind( Gene_Symbols, double_freq_acrophase, double_freq_amplitude,
           double_freq_p_statistic, fund_amp, fund_acro, var_mesor,
@@ -225,6 +226,8 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
     full_model = lm(gexp1 ~ double_wave + m1)
     full_model_AIC = AIC(full_model)
     full_model_BIC = BIC(full_model)
+
+    design_matrix <- model.matrix(gexp1 ~ double_wave + m1)
     
     #What is the amplitude of the fundamental according to V2?
     find_Af = lm(full_model$coefficients[["m1"]]*m1 ~ cos(times1-phase_bulk))
@@ -238,7 +241,8 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
     double_freq_amplitude = full_model$coefficients[["double_wave"]]
     
     #MESOR or mean of the fitted variance wave
-    var_mesor = mean( full_model$fitted.values)
+    # var_mesor = mean( full_model$fitted.values)
+    var_mesor = mean(design_matrix[,-2] %*% full_model[["coefficients"]][-2])
 
     gene_summary = cbind( Gene_Symbols, double_freq_amplitude, 
             double_freq_p_statistic, fund_amp, var_mesor,
