@@ -1,0 +1,19 @@
+<urlset xmlns = 'http://www.sitemaps.org/schemas/sitemap/0.9'>
+<url><loc>/404.html</loc></url>
+<url><loc>/authors.html</loc></url>
+<url><loc>/index.html</loc></url>
+<url><loc>/reference/calc_phi.html</loc></url>
+<url><loc>/reference/cycling_meta2d.html</loc></url>
+<url><loc>/reference/estimate_CI.html</loc></url>
+<url><loc>/reference/estimate_single_phi.html</loc></url>
+<url><loc>/reference/extract_clstr_prep_input.html</loc></url>
+<url><loc>/reference/find_analytic.html</loc></url>
+<url><loc>/reference/index.html</loc></url>
+<url><loc>/reference/is_cycling.html</loc></url>
+<url><loc>/reference/objective.html</loc></url>
+<url><loc>/reference/plot_rhythms.html</loc></url>
+<url><loc>/reference/run_meta2d.html</loc></url>
+<url><loc>/reference/var_cycling.html</loc></url>
+<url><loc>/reference/var_cycling_fix_acro.html</loc></url>
+</urlset>
+

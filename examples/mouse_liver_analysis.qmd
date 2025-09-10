@@ -22,13 +22,6 @@ clustering:
 DimPlot(seurat_obj, reduction = "umap", group.by = "all_cell_types")
 ```
 
-```{r}
-vars = sparseMatrixStats::rowVars(seurat_obj@assays$RNA$counts)
-means = sparseMatrixStats::rowMeans2(seurat_obj@assays$RNA$counts)
-plot(log(means), log(vars))
-
-```
-
 Add ZT information to Seurat object:
 
 ```{r}
@@ -39,6 +32,126 @@ ZT = as.numeric(matches[,2])
 seurat_obj$ZT = ZT
 VlnPlot(seurat_obj, features = c("nCount_RNA"), group.by = "ZT")
 
+table(seurat_obj$seurat_clusters, seurat_obj$orig.ident)
+```
+
+### Testing pseudoreplicate effect:
+
+```{r}
+# tmp = extract_clstr_prep_input2(seurat_obj, cluster_id = "hepatocytes 2", clip_sd = 10, normalize = T)
+# 
+# pb_mat = tmp[[1]]
+# var_mat = tmp[[2]]
+# 
+# # Reshape ground truth data into a long format for easy comparison
+# truth_mean_long <- pb_mat %>%
+#   tibble::rownames_to_column("gene") %>%
+#   pivot_longer(-gene, names_to = "orig.ident", values_to = "truth_mean")
+# 
+# truth_var_long <- var_mat %>%
+#   tibble::rownames_to_column("gene") %>%
+#   pivot_longer(-gene, names_to = "orig.ident", values_to = "truth_var")
+# 
+# ground_truth_df <- full_join(truth_mean_long, truth_var_long, by = c("gene", "orig.ident"))
+# 
+# 
+# results_list <- list()
+# for(i in seq(2, 10, by = 2)){
+#   message(paste("Processing for num_replicates =", i))
+#   rep_tmp = extract_clstr_prep_input2(seurat_obj, cluster_id = "hepatocytes 2", clip_sd = 100, normalize = T, num_replicates = i)
+#   
+#   pb_mat_rep = rep_tmp[[1]]
+#   var_mat_rep = rep_tmp[[2]]
+#   # Reshape replicate data into a long format
+#   rep_mean_long <- pb_mat_rep %>%
+#     tibble::rownames_to_column("gene") %>%
+#     pivot_longer(-gene, names_to = "replicate_id", values_to = "rep_mean") %>%
+#     separate(replicate_id, into = c("orig.ident", "rep_num"), sep = "_rep", remove = FALSE)
+#   
+#   rep_var_long <- var_mat_rep %>%
+#     tibble::rownames_to_column("gene") %>%
+#     pivot_longer(-gene, names_to = "replicate_id", values_to = "rep_var") %>%
+#     separate(replicate_id, into = c("orig.ident", "rep_num"), sep = "_rep", remove = FALSE)
+#   
+#   # Calculate average mean and variance across replicates for each subject
+#   avg_rep_stats <- full_join(rep_mean_long, rep_var_long, by = c("gene", "replicate_id", "orig.ident", "rep_num")) %>%
+#     group_by(gene, orig.ident) %>% #group together the pseudoreps
+#     summarise(
+#       avg_rep_mean = mean(rep_mean, na.rm = TRUE),
+#       avg_rep_var = mean(rep_var, na.rm = TRUE),
+#       .groups = "drop"
+#     )
+#   
+#   # Calculate Cells/Replicate and Quantify Departure 
+#   
+#   # Get the number of cells per replicate
+#   # total_cells_per_subject <- table(replicate_data_list$counts$orig.ident)
+#   # avg_cells_per_rep <- mean(total_cells_per_subject / i)
+#   
+#   # Join with ground truth to calculate metrics
+#   comparison_df <- left_join(avg_rep_stats, ground_truth_df, by = c("gene", "orig.ident"))
+#   
+#   # Bin genes into Low, Middle, and High expression groups based on the ground truth mean
+#   # We do this within each subject to account for subject-specific expression shifts
+#   binned_metrics <- comparison_df %>%
+#     filter(!is.na(truth_mean)) %>%
+#     group_by(orig.ident) %>%
+#     mutate(
+#       expression_bin = ntile(truth_mean, 3), # Create 3 quantile bins (tertiles)
+#       expression_bin = factor(expression_bin, levels = 1:3, labels = c("Low", "Middle", "High"))
+#     ) %>%
+#     ungroup() %>%
+#     # Now calculate metrics PER BIN for each subject
+#     group_by(orig.ident, expression_bin) %>%
+#     summarise(
+#       rmse_mean = sqrt(mean((avg_rep_mean - truth_mean)^2, na.rm = TRUE)),
+#       rmse_var = sqrt(mean((avg_rep_var - truth_var)^2, na.rm = TRUE)),
+#       cor_mean = cor(avg_rep_mean, truth_mean, use = "pairwise.complete.obs"),
+#       cor_var = cor(avg_rep_var, truth_var, use = "pairwise.complete.obs"),
+#       .groups = "drop"
+#     ) %>%
+#     # Finally, average the metrics across all subjects for each bin
+#     group_by(expression_bin) %>%
+#     summarise(
+#       mean_rmse_mean = mean(rmse_mean, na.rm = TRUE),
+#       mean_rmse_var = mean(rmse_var, na.rm = TRUE),
+#       mean_cor_mean = mean(cor_mean, na.rm = TRUE),
+#       mean_cor_var = mean(cor_var, na.rm = TRUE),
+#       .groups = "drop"
+#     )
+# 
+#   # Store results
+#   results_list[[as.character(i)]] <- binned_metrics %>%
+#     mutate(
+#       num_replicates = i    )
+#   
+# }
+# 
+# 
+# # Combine all results into a single data frame
+# final_results_df <- bind_rows(results_list)
+# 
+# 
+# 
+# # Plot RMSE vs. Cells per Replicate, faceted by expression bin
+# plot_rmse_binned <- ggplot(final_results_df, aes(x = num_replicates)) +
+#   geom_line(aes(y = mean_rmse_mean, color = "Mean")) +
+#   geom_point(aes(y = mean_rmse_mean, color = "Mean")) +
+#   geom_line(aes(y = mean_rmse_var, color = "Variance")) +
+#   geom_point(aes(y = mean_rmse_var, color = "Variance")) +
+#   facet_wrap(~ expression_bin, scales = "free_y") + # Use free y-axis scales
+#   scale_x_reverse() +
+#   labs(
+#     title = "Departure of Pseudoreplicate Statistics by Expression Level (RMSE)",
+#     x = "num_replicates",
+#     y = "Root Mean Squared Error (RMSE)",
+#     color = "Statistic"
+#   ) +
+#   theme_minimal() +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
 ```
 
 ## Now do Methods of Moments analysis (ORPHEUS)
@@ -46,11 +159,13 @@ VlnPlot(seurat_obj, features = c("nCount_RNA"), group.by = "ZT")
 ```{r}
 cluster_phis = list()
 for(cell_type in unique(seurat_obj$seurat_clusters)){
-print(paste("Analyzing", cell_type))
-cluster = subset(seurat_obj, subset = seurat_clusters == cell_type)
+  
+for(seed in c(1:4))  {
+print(paste("Analyzing", cell_type, "seed", seed))
 
-tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
 
+# tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
+tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, normalize = T, num_replicates = 2, random_seed = seed)
 pb_mat = tmp[[1]]
 var_mat = tmp[[2]]
 counts = tmp[[3]]
@@ -70,7 +185,7 @@ rownames(agg_theta_meas) = rownames(pb_mat)
 matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
 ZT = as.numeric(matches[,2])
 
-if(length(unique(diff(ZT))) != 1 || length(unique(ZT)) < 6){
+if(length(unique(diff(ZT))[unique(diff(ZT)) != 0]) != 1 || length(unique(ZT)) < 6){
   print("Cell does not have time points suitable for analysis")
   next
 }
@@ -83,7 +198,8 @@ phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.nu
 
 #hist(as.numeric(phase_pb))
 
-var_cyclers = var_cycling(ZT, var_mat, pb_mat, phase_pb)
+var_cyclers = var_cycling(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb)
+
 input_cos = var_cyclers %>% 
     left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
@@ -103,11 +219,13 @@ output = merge(output, agg_theta_meas, by.x = "Row.names", by.y = 0)
 
 
 local_res =  list("tmm" = output)
-names(local_res) = cell_type
+names(local_res) = paste0(cell_type,"_seed" ,seed)
 cluster_phis <- append(cluster_phis, list(local_res))
-
+}
 }
 ```
+
+### Combine lists from different celltypes/pseudoreplicates and plot
 
 ```{r}
 cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
@@ -120,8 +238,302 @@ cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_n
 cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
 table(cos_phis_tmm_filt$Source)
 
-# meta2d_phis_filt = filter(meta2d_phis, keep_acrodiff == T & !is.nan(phi))
-# table(meta2d_phis_filt$Source)
+phis_filt <- cos_phis_tmm_filt %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed")
+
+phis_consensus = phis_filt %>%
+  group_by(cell, Row.names) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+
+#Now phis_consensus has repeat genes for each "seed"
+#gene count by cell type:
+phis_consensus %>% group_by(cell) %>% summarize(n_genes = n_distinct(Row.names))
+
+pval_cols = c("p_statistic", "double_freq_p_statistic")
+phis_seed_avg <- phis_consensus %>%
+  select(!contains("acrophase") & !contains("AIC") & !contains("BIC")) %>%
+  group_by(cell, Row.names) %>%
+  summarise(
+    across(all_of(pval_cols), max, na.rm = TRUE),
+    across(where(is.numeric) & !all_of(pval_cols), \(x) mean(x, na.rm = T)),
+    cell = first(cell),
+    .groups = "drop"
+  ) %>% filter(cell %in% c("hepatocytes 1","hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes"))
+
+
+custom_colors <- c("cholangiocytes" = "#F8766D", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#ABA300", "hepatocytes 2" = "#0CB702", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#8494FF", "periportal hepatocytes" = "#FF68A1")
+
+liver_phi_boxplot_pseudorep = ggplot(phis_seed_avg, aes(x = cell,y =  phi, fill = cell))+
+  geom_boxplot(outlier.shape = NA)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (rad)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/liver_phi_boxplot_pseudorep.pdf", liver_phi_boxplot_pseudorep, device = "pdf", width = 6, height = 5)
+
+kruskal.test(phi ~ cell, data = phis_seed_avg)
+pairwise.wilcox.test(phis_seed_avg$phi, phis_seed_avg$cell,
+                 p.adjust.method = "BH")
+
+acrodiff_compare_pseudorep = ggplot(phis_seed_avg, aes(x = acrodiff*12/pi)) +
+  geom_histogram(binwidth = 2, color = "black", fill = "steelblue") +
+  facet_wrap(~ as.factor(cell), scales = "free_y") +
+  xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
+  ylab("Count")+
+   theme_minimal()+
+  theme(
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )
+ggsave("~/Desktop/acrodiff_compare_pseudorep.pdf", plot = acrodiff_compare_pseudorep, device = "pdf", width = 7, height = 7)
+
+
+gene_sets <- phis_seed_avg %>%
+  group_by(cell) %>%
+  summarise(genes = list(unique(Row.names))) %>%
+  deframe()
+
+#size of the intersect between all the cell types
+intersect_matrix <- outer(gene_sets, gene_sets,
+                          Vectorize(function(x, y) length(intersect(x, y))))
+dimnames(intersect_matrix) <- list(names(gene_sets), names(gene_sets))
+intersect_matrix
+
+peri_overlap = intersect(gene_sets$`pericentral hepatocytes`, gene_sets$`periportal hepatocytes`)
+
+peri_df = filter(phis_seed_avg, cell %in% c("pericentral hepatocytes","periportal hepatocytes" ) & Row.names %in% peri_overlap)
+
+pp_phi_compare_pseudorep = ggplot(peri_df, aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+ggsave("~/Desktop/periportal_vs_pericentral_phi_same_genes.pdf", pp_phi_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+pp_ac_compare_pseudorep = ggplot(peri_df, aes(x = cell,y =  Ac, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted cell rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+ggsave("~/Desktop/periportal_vs_pericentral_Ac_same_genes.pdf", pp_ac_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+pp_bulk_amp_compare_pseudorep = ggplot(peri_df, aes(x = cell,y =  amplitude_bulk, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Measured bulk rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/periportal_vs_pericentral_bulk_amp_same_genes.pdf", pp_bulk_amp_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+peri_test_df <- peri_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = cell, values_from = c(phi, Ac))
+
+wilcox.test(peri_test_df$`phi_periportal hepatocytes`, peri_test_df$`phi_pericentral hepatocytes`, paired = T)
+
+wilcox.test(peri_test_df$`Ac_periportal hepatocytes`, peri_test_df$`Ac_pericentral hepatocytes`, paired = T)
+
+############### hepatocytes ########
+hepa_overlap = intersect(gene_sets$`hepatocytes 1`, gene_sets$`hepatocytes 2`)
+
+hepa_df = filter(phis_seed_avg, cell %in% c("hepatocytes 1","hepatocytes 2" ) & Row.names %in% hepa_overlap)
+
+hepa_phi_compare_pseudorep = ggplot(hepa_df, aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_phi.pdf", hepa_phi_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa_ac_compare_pseudorep = ggplot(hepa_df, aes(x = cell,y =  log(Ac), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(prediceted cell rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_Ac.pdf", hepa_ac_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa_bulk_amp_compare_pseudorep = ggplot(hepa_df, aes(x = cell,y =  log(amplitude_bulk), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(measured bulk rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_bulk_amp.pdf", hepa_bulk_amp_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa_test_df <- hepa_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = cell, values_from = c(phi, Ac, amplitude_bulk))
+
+wilcox.test(hepa_test_df$`phi_hepatocytes 1`, hepa_test_df$`phi_hepatocytes 2`, paired = T)
+
+wilcox.test(hepa_test_df$`Ac_hepatocytes 1`, hepa_test_df$`Ac_hepatocytes 2`, paired = T)
+
+wilcox.test(hepa_test_df$`amplitude_bulk_hepatocytes 1`, hepa_test_df$`amplitude_bulk_hepatocytes 2`, paired = T)
+
+#----------------------------
+hepa1_periport_overlap = intersect(gene_sets$`hepatocytes 1`, gene_sets$`periportal hepatocytes`)
+
+hepa1_portal_df = filter(phis_seed_avg, cell %in% c("hepatocytes 1","periportal hepatocytes" ) & Row.names %in% hepa1_periport_overlap)
+
+hepa1_portal_phi_compare_pseudorep = ggplot(hepa1_portal_df, aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPeriportal_same_genes_phi.pdf", hepa1_portal_phi_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_portal_ac_compare_pseudorep = ggplot(hepa1_portal_df, aes(x = cell,y =  log(Ac), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(prediceted cell rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPeriportal_same_genes_Ac.pdf", hepa1_portal_ac_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_portal_bulk_amp_compare_pseudorep = ggplot(hepa1_portal_df, aes(x = cell,y =  log(amplitude_bulk), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(measured bulk rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPortal_same_genes_bulk_amp.pdf", hepa1_portal_bulk_amp_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_portal_test_df <- hepa1_portal_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = cell, values_from = c(phi, Ac, amplitude_bulk))
+
+wilcox.test(hepa1_portal_test_df$`phi_hepatocytes 1`,hepa1_portal_test_df$`phi_periportal hepatocytes`, paired = T)
+
+wilcox.test(hepa1_portal_test_df$`Ac_hepatocytes 1`, hepa1_portal_test_df$`Ac_periportal hepatocytes`, paired = T)
+
+wilcox.test(hepa1_portal_test_df$`amplitude_bulk_hepatocytes 1`, hepa1_portal_test_df$`amplitude_bulk_periportal hepatocytes`, paired = T)
+
+#--------------------------------
+save(phis_consensus, file = "~/Desktop/phis_2pr_4folds.RData")
+```
+
+### Plot genes for celltypes
+
+```{r}
+
+cell_type = "hepatocytes 1"
+
+plot_me = phis_consensus %>% filter(cell == cell_type & double_freq_p_statistic < 0.05) %>% arrange(double_freq_p_statistic) %>% distinct(Row.names) %>% slice(1:5) %>% unname %>% unlist
+
+tmp = extract_clstr_prep_input2(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T, num_replicates = 2, random_seed = seed)
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+plot_rhythms(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs")
 ```
 
 ```{r}
@@ -136,7 +548,7 @@ pairwise.wilcox.test(cos_phis_subset$phi, cos_phis_subset$Source, p.adjust.metho
 custom_colors <- c("cholangiocytes" = "#F8766D", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#ABA300", "hepatocytes 2" = "#0CB702", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#8494FF", "periportal hepatocytes" = "#FF68A1")
 
 liver_phi_boxplot = ggplot(cos_phis_tmm_filt, aes(x = Source,y =  phi, fill = Source))+
-  geom_boxplot()+
+  geom_boxplot(outlier.shape = NA)+
   theme_minimal()+
   xlab("Cell type")+
   ylab("Prediceted phase std. (rad)")+
@@ -235,7 +647,7 @@ pp_phi_compare = ggplot(peri_df, aes(x = Source,y =  phi*12/pi, fill = Source))+
 ggsave("~/Desktop/periportal_vs_pericentral_phi_same_genes.pdf", pp_phi_compare, device = "pdf", width = 5, height = 5)
 
 pp_ac_compare = ggplot(peri_df, aes(x = Source,y =  Ac, fill = Source))+
-  geom_boxplot()+
+  geom_boxplot(outliers = F)+
   theme_minimal()+
   xlab("Cell type")+
   ylab("Prediceted cell rhythm amp.")+

@@ -38,13 +38,14 @@ find_analytic = function(V_2w, V_w, S_amp, S_DC){
 #' @param var_cycling_results df of variance cycling results, as obtained from var_cycling().
 #' @param cycling_p_thr A numeric threshold for cycling p-values to filter significant genes. Default is 0.05.
 #' @param bulk_amp_thr A numeric threshold for the bulk amplitude. Default is 0.5.
+#' @param info_criterion A string indicating the information criterion to use for 2nd harmonic model comparison ("AIC" or "BIC"). Default is "AIC".
 #' @return A data frame summarizing the phi parameters (G, Ac, theta, and phi) for rhythmic genes, or an empty data frame if no genes meet the criteria.
 #' @importFrom dplyr filter select mutate across left_join %>% everything
 #' @importFrom tibble column_to_rownames
 #' @importFrom stats lm anova p.adjust model.matrix sd var
 #' @importFrom graphics points
 #' @export
-calc_phi = function(pb_cycling_results, var_cycling_results, cycling_p_thr = 0.05,  bulk_amp_thr = 0.5) {
+calc_phi = function(pb_cycling_results, var_cycling_results, cycling_p_thr = 0.05,  bulk_amp_thr = 0.5, info_criterion = "AIC") {
     # Check if pb_cycling_results or var_cycling_results are empty
     if (nrow(pb_cycling_results) == 0) {
         stop("Error: pb_cycling_results is empty. No genes to process.")
@@ -67,8 +68,17 @@ calc_phi = function(pb_cycling_results, var_cycling_results, cycling_p_thr = 0.0
         # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
         # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
         dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
-        column_to_rownames("Gene_Symbols")%>%
-        filter(partial_model_AIC_var > full_model_AIC_var)
+        column_to_rownames("Gene_Symbols")
+        
+        if (info_criterion == "BIC"){
+            input = input %>%
+                filter(partial_model_BIC_var > full_model_BIC_var)
+            message("Using BIC for model comparison")
+        } else {
+            input = input %>%
+                filter(partial_model_AIC_var > full_model_AIC_var)
+            message("Using AIC for model comparison")
+        }
 
     # hist(input$acrodiff, main = "Acrophase difference histogram", xlab = "Acrophase difference (radians)")
     # Check if input is empty after filtering
@@ -96,7 +106,9 @@ calc_phi = function(pb_cycling_results, var_cycling_results, cycling_p_thr = 0.0
     phi = input %>%
         filter(amplitude_bulk >= bulk_amp_thr) %>%
         apply(., 1, function(row) {
-            Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+            suppressWarnings(
+                 Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+                 )
         }) %>%
         t %>%
         as.data.frame
@@ -104,3 +116,8 @@ calc_phi = function(pb_cycling_results, var_cycling_results, cycling_p_thr = 0.0
     colnames(phi) = c("G", "Ac", "theta", "phi")
     return(phi)
 }
+
+utils::globalVariables(c(
+  "p_statistic", "Gene_Symbols", "double_freq_amplitude", "fund_amp", "amplitude_bulk", "mesor_bulk",
+  "partial_model_BIC_var", "full_model_BIC_var", "partial_model_AIC_var", "full_model_AIC_var", "."
+))

@@ -4,7 +4,7 @@ Title: Single cell phase spread analysis
 Version: 1.0.0
 Author: Henry Hollis
 Maintainer: Henry Hollis <henry.hollis@pennmedicine.upenn.edu>
-Description: Tools for detecting the phase spread of single cell rhythms
+Description: Tools for detecting the phase spread of single cell rhythms.
 License: GPL-3
 Encoding: UTF-8
 Imports:

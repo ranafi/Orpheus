@@ -1,10 +1,13 @@
 #' @importFrom foreach foreach `%do%`
 #' @importFrom tibble as_tibble
-#' @importFrom tidyr drop_na
+#' @importFrom tidyr drop_na all_of
 #' @importFrom stats lm anova p.adjust AIC qnorm vcov coef
 #' @importFrom utils write.table
 #' @importFrom MetaCycle meta2d
 #' @importFrom tools file_path_sans_ext
+#' @importFrom graphics lines par
+#' @importFrom stats BIC
+#' @importFrom utils read.table
 NULL
 
 #' Detect Rhythmic Genes in Pseudobulk Data
@@ -298,6 +301,8 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     pb_model <- lm(m1 ~ sin(times1) + cos(times1))
     pb_anova_results = anova(pb_model_partial, pb_model)
     pb_acro = atan2(pb_model[["coefficients"]][["sin(times1)"]], pb_model[["coefficients"]][["cos(times1)"]]) %% (2*pi)
+    pb_amp = sqrt(pb_model[["coefficients"]][["sin(times1)"]]^2 + pb_model[["coefficients"]][["cos(times1)"]]^2)
+    pb_intercept = pb_model[['coefficients']]["(Intercept)"]
 
     var_partial <- lm(gexp1 ~ m1)
     var_model <- lm(gexp1 ~ sin(2 * times1) + cos(2 * times1) + m1)
@@ -306,6 +311,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     sin_coff = var_model[["coefficients"]][["sin(2 * times1)"]]
     cos_coeff = var_model[["coefficients"]][["cos(2 * times1)"]]
     double_freq_acrophase = atan2(sin_coff, cos_coeff) %% (2*pi) / 2
+    var_double_freq_amp = sqrt(sin_coff^2 + cos_coeff^2)
 
     # 2 plots side by side
     par(mfrow = c(1, 2))  # 1 row, 2 columns
@@ -315,7 +321,9 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
          main = paste("PB Expression for", Gene_Symbols),
          sub= paste("p-value:", round(pb_anova_results$`Pr(>F)`[2], 3), ", acrophase:", round(pb_acro, 3)),
          pch = 19, col = "blue")
-    lines(sort(times1), pb_model$fitted.values[order(times1)], col = "red")
+    times_ideal = seq(times1[1], times1[length(times1)], by = 0.1)
+    pb_ideal = pb_amp * cos(times_ideal - pb_acro) + pb_intercept
+    lines(times_ideal, pb_ideal, col = "red")
 
     # Plot double-frequency variance
     circ <- gexp1 - design_matrix[, -c(2, 3)] %*% var_model[["coefficients"]][-c(2, 3)]
@@ -325,7 +333,8 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
          pch = 19,
          col = "blue")
     circ_fit <- var_model$fitted.values - design_matrix[, -c(2, 3)] %*% var_model[["coefficients"]][-c(2, 3)]
-    lines(sort(times1), circ_fit[order(times1)], col = "red")
+    var_ideal = var_double_freq_amp * cos(2 * (times_ideal - double_freq_acrophase))
+    lines(times_ideal, var_ideal, col = "red")
   }
 }
 
@@ -528,3 +537,7 @@ cycling_meta2d <- function(times, var_mat, mean_mat,
   # Return all results as a list
   return(list(double_freq_results = circ_results, fund_results = mean_results, pb_results = pb_results))
 }
+
+utils::globalVariables(c(
+  "gene_i", "all_of", "seurat_clusters", "nCount_RNA"
+))

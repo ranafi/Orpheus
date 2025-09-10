@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Orpheus Logo" width="200"/>
+  <img src="man/figures/full_logo.png" alt="Orpheus Logo" width="200"/>
 </p>
 
 <h1 align="center">Orpheus</h1>

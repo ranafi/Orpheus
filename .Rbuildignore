@@ -1,0 +1,7 @@
+^examples/
+^assets/
+^R/input_*
+^R/output/
+^pkgdown/
+^docs/
+_pkgdown.yml

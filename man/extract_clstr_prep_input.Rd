@@ -10,9 +10,11 @@ extract_clstr_prep_input(
   assay = "RNA",
   top_n_genes = 10000,
   cells_threshold = 10,
-  clip_sd = 2,
+  clip_sd = NULL,
   normalize = TRUE,
-  verbose = TRUE
+  num_replicates = NULL,
+  verbose = TRUE,
+  random_seed = 42
 )
 }
 \arguments{
@@ -26,21 +28,30 @@ extract_clstr_prep_input(
 
 \item{cells_threshold}{The minimum number of cells required per individual (default is 10).}
 
-\item{clip_sd}{The number of standard deviations to use for clipping cells based on counts (default is 2).}
+\item{clip_sd}{The number of standard deviations to use for clipping cells based on total counts (default is 2).}
 
 \item{normalize}{Logical indicating whether to normalize the data using edgeR's TMM method (default is TRUE).}
 
+\item{num_replicates}{An integer specifying the number of pseudoreplicates to create per subject.}
+
 \item{verbose}{Logical indicating whether to print progress messages (default is TRUE).}
+
+\item{random_seed}{An integer seed for reproducibility when creating pseudoreplicates.}
 }
 \value{
 A list containing pseudobulk normalized counts and variance matrices.
 }
 \description{
-This function processes a Seurat object to filter cells based on thresholds, extract normalized counts, compute pseudobulk data, 
-and compute variance matrices, while keeping data in a sparse matrix format for as long as possible to improve performance and reduce memory usage.
-It returns a list containing the pseudobulk normalized counts and variance matrices.
+This function processes a Seurat object to filter cells, select top genes, optionally normalize counts,
+and compute pseudobulk data. It can generate pseudobulks per subject or create pseudoreplicates
+from each subject's cells. Data is kept in a sparse matrix format for as long as possible to
+improve performance and reduce memory usage.
 }
 \examples{
-# Example usage:
+# Example usage for pseudobulk per subject:
 # pseudobulk_data <- extract_clstr_prep_input(seurat_obj, cluster_id = "2")
+
+# Example usage for 5 pseudoreplicates per subject:
+# pseudorep_data <- extract_clstr_prep_input(seurat_obj, cluster_id = "2", num_replicates = 5)
+
 }

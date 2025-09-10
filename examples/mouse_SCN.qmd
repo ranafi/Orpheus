@@ -1,0 +1,334 @@
+---
+title: "Mouse_SCN"
+format: html
+editor: visual
+---
+
+```{r}
+library(Seurat)
+library(dplyr)
+
+```
+
+```{r}
+# Path to your GSE folder
+folder <- "../../GSE117295_RAW/"
+
+# List all CSV files in the folder
+files <- list.files(folder, pattern = "_CT[0-9]+.csv$", full.names = TRUE)
+
+# Create a list to store Seurat objects for each timepoint
+seurat_list <- list()
+
+for (f in files) {
+  # Use filename (without extension) as timepoint ID
+  timepoint <- stringr::str_extract(tools::file_path_sans_ext(basename(f)), pattern = "(?<=CT).*")
+  
+  # Read in the CSV
+  dat <- read.csv(f, row.names = 1) 
+  
+  # Create Seurat object
+  seu <- CreateSeuratObject(counts = dat, project = timepoint)
+  
+  # Add metadata for timepoint
+  seu$timepoint <- as.numeric(timepoint)
+  
+  # Store in list
+  seurat_list[[timepoint]] <- seu
+}
+
+# Merge all Seurat objects into one
+combined <- merge(seurat_list[[1]], y = seurat_list[-1])
+
+# Check metadata
+head(combined@meta.data)
+
+```
+
+```{r}
+
+library(Seurat)
+library(dplyr)
+library(randomForest)
+library(ggplot2)
+
+
+obj = combined
+
+# ---- Tunables (adjust to taste) ----
+mito_max      <- 5
+min_genes     <- 200
+train_min     <- 800
+n_hvgs        <- 2000
+n_pcs         <- 30
+cluster_res   <- 0.6
+tsne_perp     <- 30
+rf_trees      <- 1000
+seed          <- 1234
+
+set.seed(seed)
+
+#percent mito
+obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^mt-")
+
+# ---- Split into training vs projection by nFeature_RNA ----
+training <- subset(obj, subset = nFeature_RNA >= train_min)
+projection <- subset(obj, subset = nFeature_RNA < train_min & nFeature_RNA > min_genes)
+
+# ---- Mitochondrial filtering on both sets ----
+training <- subset(training, subset = percent.mt <= mito_max)
+projection <- subset(projection, subset = percent.mt <= mito_max)
+
+message(sprintf("Training cells: %d | Projection cells: %d",
+                ncol(training), ncol(projection)))
+
+# ---- Normalize + HVGs on training only (to match paper’s flow) ----
+training <- NormalizeData(training, normalization.method = "LogNormalize")
+training <- FindVariableFeatures(training, selection.method = "vst", nfeatures = n_hvgs)
+training <- ScaleData(training, features = VariableFeatures(training), vars.to.regress = "percent.mt")
+training <- RunPCA(training, features = VariableFeatures(training), npcs = n_pcs, verbose = FALSE)
+
+# ---- Graph clustering with SLM (smart local moving) ----
+training <- FindNeighbors(training, dims = 1:n_pcs)
+training <- FindClusters(training, resolution = cluster_res, algorithm = 3, random.seed = seed) # algorithm=3 = SLM
+training <- RunTSNE(training, dims = 1:n_pcs, perplexity = tsne_perp)
+
+# cluster labels live in training$seurat_clusters
+DimPlot(training, reduction = "tsne", label = TRUE) + ggtitle("Training set clusters (t-SNE)")
+
+# ---- Prepare projection set on the same features/space ----
+# Normalize/scale using the same HVG set to align with training feature space
+hvg <- VariableFeatures(training)
+projection <- NormalizeData(projection)
+projection <- ScaleData(projection, features = hvg, vars.to.regress = "percent.mt")
+projection <- RunPCA(projection, features = hvg, npcs = n_pcs, verbose = FALSE)
+
+# ---- Random forest: train on training PCA, predict for projection ----
+x_train <- Embeddings(training, "pca")[, 1:n_pcs, drop = FALSE]
+y_train <- factor(training$seurat_clusters)
+
+rf <- randomForest(x = x_train, y = y_train, ntree = rf_trees, importance = FALSE)
+proj_pred <- predict(rf, newdata = Embeddings(projection, "pca")[, 1:n_pcs, drop = FALSE], type = "vote")
+proj_call <- colnames(proj_pred)[max.col(proj_pred, ties.method = "first")]
+
+projection$rf_cluster <- factor(proj_call, levels = levels(y_train))
+projection$rf_maxvote <- apply(proj_pred, 1, max)
+
+# ---- Optional: joint visualization (run t-SNE on combined PCA for a single map) ----
+# Recreate a combined object using the same HVGs and PCs for both sets
+xy_combined <- merge(training, projection)
+xy_combined <- ScaleData(xy_combined, features = hvg, vars.to.regress = "percent.mt", verbose = FALSE)
+xy_combined <- RunPCA(xy_combined, features = hvg, npcs = n_pcs, verbose = FALSE)
+xy_combined <- RunTSNE(xy_combined, dims = 1:n_pcs, perplexity = tsne_perp)
+
+# Carry cluster labels (training) and RF labels (projection) onto combined object
+xy_combined$label_for_plot <- NA
+xy_combined$label_for_plot[colnames(training)] <- paste0("Train_", training$seurat_clusters)
+xy_combined$label_for_plot[colnames(projection)] <- paste0("Proj_", projection$rf_cluster)
+
+DimPlot(xy_combined, reduction = "tsne", group.by = "label_for_plot", label = FALSE, shuffle = TRUE) +
+  ggtitle("Training clusters + projected cells (RF)")
+
+# ---- 6-fold subset validation (like Extended Data Fig. 1b) ----
+# Reference = full training RF predictions on projection set (proj_call)
+ref_proj_call <- projection$rf_cluster
+
+K <- 6
+folds <- sample(rep(1:K, length.out = length(y_train)))
+
+match_rate_by_fold <- numeric(K)
+match_rate_by_cluster <- vector("list", K)
+
+for (k in 1:K) {
+  idx <- which(folds == k)
+  x_sub <- x_train[idx, , drop = FALSE]
+  y_sub <- y_train[idx]
+  rf_k <- randomForest(x = x_sub, y = y_sub, ntree = rf_trees)
+  pred_k <- predict(rf_k, newdata = Embeddings(projection, "pca")[, 1:n_pcs, drop = FALSE])
+  # Compare projection labels from subset-vs-full classifiers
+  matches <- pred_k == ref_proj_call
+  match_rate_by_fold[k] <- mean(matches)
+  # per-cluster agreement (by full-set label)
+  per_cl <- tapply(matches, ref_proj_call, mean) #means here [0-1] show if cluster "ref numer" agrees with cluster "fold predicted number"
+  match_rate_by_cluster[[k]] <- per_cl
+}
+
+# Summaries
+overall_consistency <- data.frame(
+  fold = 1:K,
+  match_rate = match_rate_by_fold
+)
+
+print(overall_consistency)
+
+# Aggregate per-cluster consistency across folds
+all_clusters <- sort(unique(ref_proj_call))
+per_cluster_mat <- sapply(1:K, function(k) {
+  x <- match_rate_by_cluster[[k]]
+  setNames(x[all_clusters], all_clusters)
+})
+per_cluster_df <- data.frame(
+  cluster = all_clusters,
+  consistency = rowMeans(per_cluster_mat, na.rm = TRUE)
+)
+
+ggplot(overall_consistency, aes(factor(fold), match_rate)) +
+  geom_col() + labs(x = "Subset fold", y = "Agreement with full-set projection",
+                    title = "Projection label consistency across 6 training subsets") +
+  ylim(0, 1)
+
+ggplot(per_cluster_df, aes(cluster, consistency)) +
+  geom_col() + coord_flip() +
+  labs(x = "Projected cluster (full-set RF call)",
+       y = "Mean agreement across folds",
+       title = "Per-cluster projection consistency") +
+  ylim(0, 1)
+
+xy_combined$final_cluster <- ifelse(
+  is.na(xy_combined$seurat_clusters),
+  as.character(xy_combined$rf_cluster),
+  as.character(xy_combined$seurat_clusters)
+)
+
+# make it a factor with consistent levels
+xy_combined$final_cluster <- factor(xy_combined$final_cluster)
+obj = JoinLayers(xy_combined)
+
+
+```
+
+```{r}
+
+# Find markers for your clusters
+markers <- FindAllMarkers(obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+# markers has: cluster, gene, avg_log2FC, p_val_adj, etc.
+
+# Load their marker table (saved from Supplementary)
+paper_markers <- readxl::read_xlsx("~/Downloads/41593_2020_586_MOESM2_ESM.xlsx", skip = 3, sheet = 1) %>% select(1:7)
+# For each cluster, see which paper-defined markers are enriched
+clusters <- levels(obj$final_cluster)
+best_paper_clusters = c()
+for (cl in clusters) {
+  my_markers <- markers %>% filter(cluster == cl) %>% pull(gene)
+  overlap <- paper_markers %>% filter(`gene...7` %in% my_markers)
+  best_paper_clusters = c(best_paper_clusters, names(sort(table(overlap$cluster...6), decreasing = T)[1]))
+}
+best_match <- data.frame(seurat_cluster = clusters, best_paper_clusters = best_paper_clusters)
+
+
+
+# Add cell type labels to metadata
+xy_combined$seurat_clusters <- plyr::mapvalues(
+  x = as.character(xy_combined$final_cluster),
+  from = best_match$seurat_cluster,
+  to = best_match$best_paper_clusters
+)
+
+# Add cell type labels to metadata
+training$celltype <- plyr::mapvalues(
+  x = as.character(training$seurat_clusters),
+  from = best_match$seurat_cluster,
+  to = best_match$best_paper_clusters
+)
+
+#  make factor with nice ordering
+xy_combined$seurat_clusters <- factor(xy_combined$seurat_clusters)
+training$celltype <- factor(training$celltype)
+
+
+# ---- Save useful outputs ----
+# training (clustered), projection with RF labels, combined t-SNE
+
+saveRDS(xy_combined,  file = "~/Desktop/SCN_mouse_custom_clustering.rds")
+```
+
+Compare this clustering to Fig 1e in paper (training cells only).
+
+```{r}
+# Suppose your metadata has 'celltype' (Astrocytes, Neurons, etc.)
+Idents(training) <- "celltype"
+
+# Choose marker genes (make sure they match your gene symbols!)
+markers <- c("Agt", "Itm2a", "Tmem212", "Hexb", "Celf4",
+             "Pdgfra", "Top2a", "Plp1", "Opalin",
+             "Plin3", "Tnr", "Col23a1")
+
+# Violin plots for each marker across cell types
+VlnPlot(training, features = markers, group.by = "celltype",
+        pt.size = 0, stack = TRUE, flip = F, combine = TRUE)
+
+table(xy_combined$timepoint, xy_combined$celltype)
+
+```
+
+Do Orpheus:
+
+```{r}
+cluster_phis = list()
+for(cell_type in unique(xy_combined$celltype)){
+  
+print(paste("Analyzing", cell_type))
+
+seurat_obj = JoinLayers(xy_combined)
+# tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
+tmp = extract_clstr_prep_input2(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T, num_replicates = 2)
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Variance of NB is var = mean + mean^2*theta
+#rearrange to solve for theta = (var-mean)/mean^2
+time_wise_theta_meas <- as.data.frame(mapply(function(v,m){(v-m)/m^2}, var_mat, pb_mat))
+rownames(time_wise_theta_meas) = rownames(pb_mat)
+colnames(time_wise_theta_meas) = paste0(colnames(time_wise_theta_meas), "_theta_meas")
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
+
+
+#Recover time in hours that sample was collected
+
+matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
+ZT = as.numeric(matches[,2])
+# ZT = as.numeric(colnames(pb_mat))
+
+#Call cosinor regression methods, where phases of variance wave are NOT fixed:
+pb_cycling = is_cycling(ZT, pb_mat, time_units = "hrs")
+
+all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
+phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
+
+#hist(as.numeric(phase_pb))
+
+var_cyclers = var_cycling(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb)
+
+bulk_amp_thr = 0.1
+
+input_cos = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= bulk_amp_thr) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+
+phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = bulk_amp_thr)
+
+plot_rhythms(ZT, var_mat, pb_mat, plot_me = c("Actb"))
+
+output_cos_tmm = merge(phi, input_cos, by = 0)
+output = merge(output_cos_tmm, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
+output = merge(output, agg_theta_meas, by.x = "Row.names", by.y = 0)
+
+
+local_res =  list("tmm" = output)
+names(local_res) = paste0(cell_type,"_seed" ,seed)
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+```

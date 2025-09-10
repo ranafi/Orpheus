@@ -8,7 +8,8 @@ calc_phi(
   pb_cycling_results,
   var_cycling_results,
   cycling_p_thr = 0.05,
-  bulk_amp_thr = 0.5
+  bulk_amp_thr = 0.5,
+  info_criterion = "AIC"
 )
 }
 \arguments{
@@ -19,6 +20,8 @@ calc_phi(
 \item{cycling_p_thr}{A numeric threshold for cycling p-values to filter significant genes. Default is 0.05.}
 
 \item{bulk_amp_thr}{A numeric threshold for the bulk amplitude. Default is 0.5.}
+
+\item{info_criterion}{A string indicating the information criterion to use for 2nd harmonic model comparison ("AIC" or "BIC"). Default is "AIC".}
 }
 \value{
 A data frame summarizing the phi parameters (G, Ac, theta, and phi) for rhythmic genes, or an empty data frame if no genes meet the criteria.
