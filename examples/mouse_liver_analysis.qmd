@@ -514,7 +514,115 @@ wilcox.test(hepa1_portal_test_df$`Ac_hepatocytes 1`, hepa1_portal_test_df$`Ac_pe
 wilcox.test(hepa1_portal_test_df$`amplitude_bulk_hepatocytes 1`, hepa1_portal_test_df$`amplitude_bulk_periportal hepatocytes`, paired = T)
 
 #--------------------------------
+hepa1_pericent_overlap = intersect(gene_sets$`hepatocytes 1`, gene_sets$`pericentral hepatocytes`)
+
+hepa1_central_df = filter(phis_seed_avg, cell %in% c("hepatocytes 1","pericentral hepatocytes" ) & Row.names %in% hepa1_pericent_overlap)
+
+hepa1_central_phi_compare_pseudorep = ggplot(hepa1_central_df, aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPericentral_same_genes_phi.pdf", hepa1_central_phi_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_central_ac_compare_pseudorep = ggplot(hepa1_central_df, aes(x = cell,y =  log(Ac), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(prediceted cell rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPericentral_same_genes_Ac.pdf", hepa1_central_ac_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_central_bulk_amp_compare_pseudorep = ggplot(hepa1_central_df, aes(x = cell,y =  log(amplitude_bulk), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(measured bulk rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vCentral_same_genes_bulk_amp.pdf", hepa1_central_bulk_amp_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+
+hepa1_central_test_df <- hepa1_central_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = cell, values_from = c(phi, Ac, amplitude_bulk))
+
+wilcox.test(hepa1_central_test_df$`phi_hepatocytes 1`,hepa1_central_test_df$`phi_pericentral hepatocytes`, paired = T)
+
+wilcox.test(hepa1_central_test_df$`Ac_hepatocytes 1`, hepa1_central_test_df$`Ac_pericentral hepatocytes`, paired = T)
+
+wilcox.test(hepa1_central_test_df$`amplitude_bulk_hepatocytes 1`, hepa1_central_test_df$`amplitude_bulk_pericentral hepatocytes`, paired = T)
+
+
+#--------------------------------
 save(phis_consensus, file = "~/Desktop/phis_2pr_4folds.RData")
+```
+
+### Write out RNKS
+
+```{r}
+hepa1_rnk = filter(phis_seed_avg, cell == "hepatocytes 1") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(hepa1_rnk, file = "~/Desktop/Mouse_liver_hepa1.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa2_rnk = filter(phis_seed_avg, cell == "hepatocytes 2") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(hepa2_rnk, file = "~/Desktop/Mouse_liver_hepa2.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa1MinusPeriportal_rnk = data.frame(Gene_Symbols = hepa1_portal_test_df$Row.names,
+                     metric = hepa1_portal_test_df$`phi_hepatocytes 1` - hepa1_portal_test_df$`phi_periportal hepatocytes`) %>% drop_na() %>% arrange(metric)
+
+write.table(hepa1MinusPeriportal_rnk, file = "~/Desktop/Mouse_liver_hepa1MinusPeriportal.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa1MinusPericentral_rnk = data.frame(Gene_Symbols = hepa1_central_test_df$Row.names,
+                     metric = hepa1_central_test_df$`phi_hepatocytes 1` - hepa1_central_test_df$`phi_pericentral hepatocytes`) %>% drop_na() %>% arrange(metric)
+
+write.table(hepa1MinusPericentral_rnk, file = "~/Desktop/Mouse_liver_hepa1MinusPericentral.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
 ```
 
 ### Plot genes for celltypes

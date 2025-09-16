@@ -39,7 +39,7 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
       # Check for all zeros or zero variance
     if (all(gexp1 == 0) || sd(gexp1) == 0) {
       # Return NA row for this gene
-      return(c(Gene_Symbols, rep(NA, 7))) # 9 columns to match the number of outputs
+      return(c(Gene_Symbols, rep(NA, 11))) #  columns to match the number of outputs
     }
     
     partial_model = lm(gexp1 ~ 1)
@@ -51,6 +51,15 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
     full_model_BIC = BIC(full_model)
 
     design_matrix <- model.matrix(gexp1 ~ sin(times1) + cos(times1))
+    sv <- svd(design_matrix)$d
+    tol <- 1e-14
+    rankX <- sum(sv > tol)
+    full <- ncol(design_matrix)
+
+    if (rankX < full) {
+      # design matrix is rank-deficient -> at least one coef would be NA
+      return(c(Gene_Symbols, rep(NA, 11))) # columns to match the number of outputs
+    }
     
     anova_results = anova(partial_model, full_model)
     sin_coff = full_model[["coefficients"]][["sin(times1)"]]
@@ -73,7 +82,12 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
     return(gene_summary)
     
   }
-  all_genes = as_tibble(all_genes) %>% drop_na
+  all_genes = as_tibble(all_genes)
+  colnames(all_genes) <- c(
+    "Gene_Symbols", "acrophase_bulk","amplitude_bulk",
+    "p_statistic", "amp_ratio", "sin_coff", "cos_coeff", "mesor_bulk",
+    "partial_model_AIC", "full_model_AIC", "partial_model_BIC", "full_model_BIC")
+  all_genes = drop_na(all_genes)
   all_genes$BHQ = p.adjust(as.numeric(all_genes$p_statistic), "BH")
   all_genes$Bonf = p.adjust(as.numeric(all_genes$p_statistic), "bonferroni")
   return(all_genes)
@@ -116,7 +130,7 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     # Check for all zeros or zero variance
     if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
       # Return NA row for this gene
-      return(c(Gene_Symbols, rep(NA, 8))) # 9 columns to match the number of outputs
+      return(c(Gene_Symbols, rep(NA, 11))) # columns to match the number of outputs
     }
     
     partial_model = lm(gexp1 ~ m1)
@@ -128,6 +142,15 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     full_model_BIC = BIC(full_model)
 
     design_matrix <- model.matrix(gexp1 ~ sin(2*times1) + cos(2*times1) + m1)
+    sv <- svd(design_matrix)$d
+    tol <- 1e-14
+    rankX <- sum(sv > tol)
+    full <- ncol(design_matrix)
+
+    if (rankX < full) {
+      # design matrix is rank-deficient -> at least one coef would be NA
+      return(c(Gene_Symbols, rep(NA, 11))) # columns to match the number of outputs
+    }
     
     anova_results = anova(partial_model, full_model)
     sin_coff = full_model[["coefficients"]][["sin(2 * times1)"]]
@@ -175,7 +198,13 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     return(gene_summary)
     
   }
-  all_genes = as_tibble(all_genes) %>% drop_na
+  all_genes = as_tibble(all_genes)
+  colnames(all_genes) <- c(
+    "Gene_Symbols", "double_freq_acrophase", "double_freq_amplitude",
+    "double_freq_p_statistic", "fund_amp", "fund_acro", "var_mesor",
+    "partial_model_AIC", "full_model_AIC", "partial_model_BIC", "full_model_BIC", "raw_2w_amp"
+  )
+  all_genes = drop_na(all_genes)
   all_genes$BHQ = p.adjust(as.numeric(all_genes$double_freq_p_statistic), "BH")
   all_genes$Bonf = p.adjust(as.numeric(all_genes$double_freq_p_statistic), "bonferroni")
   return(all_genes)
@@ -192,8 +221,7 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
 #' @param phase_pb A numeric vector of pseudobulk acrophases (in radians) for each gene, typically obtained from `is_cycling()`.
 #' @param time_units A string indicating the time units ("hrs" for hours or "radians" for radians). Default is "hrs".
 #' @return A tibble summarizing double-frequency rhythmicity metrics for each gene, including acrophase, amplitude, p-values, and adjusted p-values.
-
-#' @export
+#' @noRd
 var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") {
   `%do%` <- foreach::`%do%`
   cat(paste("\nRunning var_cycling_fix_acro()"))
@@ -373,8 +401,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
 #' rownames(df) <- c("Gene1", "Gene2", "Gene3")
 #' run_meta2d(df, timepoints = c(0, 4, 8), out_file = "input.txt", out_dir = "output/")
 #' }
-#'
-#' @export
+#' @noRd
 run_meta2d <- function(df,
                       timepoints,
                       out_file,
@@ -416,7 +443,7 @@ run_meta2d <- function(df,
 #'   \item `fund_results`: meta2d results for mean rhythms.
 #'   \item `pb_results`: meta2d results for pseudobulk rhythms.
 #' }
-#' @export
+#' @noRd
 cycling_meta2d <- function(times, var_mat, mean_mat, 
                             out_file_circ, out_file_mean, out_file_pb, out_dir,  ...) {
    cat(paste("\nRunning metacycle2d, input times must be regularly spaced, e.g. 0-24 and in hrs units\n"))

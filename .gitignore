@@ -1,7 +1,6 @@
 examples/input*
 examples/output/*
-examples/exc35_ad*
-examples/exc35_ctl*
+examples/*.h5Seurat
 examples/*.RData
 .DS_Store
 examples/.DS_Store

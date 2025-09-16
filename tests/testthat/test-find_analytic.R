@@ -123,6 +123,43 @@ test_that("acrodiffs calculation works as intended", {
 })
 
 
+test_that("var_cycling and is_cycling can handle sparse data with non-full rank design matrices", {
+  x = seq(0, 2*pi, by = pi/4)
+  #pseudobulk rhythms
+  pb1 = 4*cos(x-0)+6           #bulk rhythm peaks at x = 0
+  pb2 = 3*cos(x-pi/3)+7        #bulk rhythm peaks at x = pi/3
+  pb3 = 2*cos(x-0)+5           #bulk rhythm peaks at x = 0
+  pb4 = 4*cos(x-3*pi/2)+3      #bulk rhythm peaks at x = 3*pi/2
+
+
+
+  #double frequency rhythms
+  #double freq phase offset:
+  dfpo = pi/2
+  var1 = 3*cos(2*(x-dfpo-0))+pb1   #peaks double-freq offset after pb wave
+  var2 = cos(2*(x-dfpo-pi/3))+pb2
+  var3 = cos(2*(x-dfpo-0))+pb3
+  var4 = cos(2*(x-dfpo-3*pi/2))+pb4
+
+  pb_mat = rbind(pb1, pb2, pb3, pb4)
+  var_mat = rbind(var1, var2, var3, var4)
+
+  #Mask entries:
+  pb_mat[4,] = 0
+  var_mat[-1,] = 0
+
+  rownames(pb_mat) = rownames(var_mat) = c("Gene1", "Gene2", "Gene3", "Gene4")
+
+  pb_cycling = is_cycling(x, pb_mat, time_units = "rad")
+  pb_phases = as.numeric(unname(unlist(pb_cycling$acrophase_bulk)))
+  var_cyclers = var_cycling(x, var_mat[-4,], pb_mat[-4,],pb_phases , time_units = "rad")
+
+
+  expect_equal(nrow(pb_cycling), 3)  
+  expect_equal(nrow(var_cyclers), 1)  
+
+})
+
 #Commented out because it generates files
 # test_that("metacycle code is runnable", {
 #   x = seq(0,22, by = 2) #hrs 0-22 by 2

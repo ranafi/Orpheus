@@ -7,8 +7,7 @@
 #' @param S_amp pseudobulk cycling amplitude.
 #' @param S_DC Mesor of the pseudobulk cycling.
 #' @return A numeric vector containing G (Mesor), Ac (Cell rhythm amplitude), and p (phase shift_standard_dev).
-#' @export
-
+#' @noRd
 find_analytic = function(V_2w, V_w, S_amp, S_DC){
   
   # Solve for G: trivial
@@ -107,7 +106,7 @@ calc_phi = function(pb_cycling_results, var_cycling_results, cycling_p_thr = 0.0
         filter(amplitude_bulk >= bulk_amp_thr) %>%
         apply(., 1, function(row) {
             suppressWarnings(
-                 Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+                 find_analytic(row[1], row[2], row[3], row[4])
                  )
         }) %>%
         t %>%

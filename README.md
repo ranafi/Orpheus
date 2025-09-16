@@ -2,7 +2,8 @@
   <img src="man/figures/full_logo.png" alt="Orpheus Logo" width="200"/>
 </p>
 
-<h1 align="center">Orpheus</h1>
+<h1 align="center">**O**scillatory **R**hythm and **P**hase **H**eterogeneity **E**xtraction **U**sing **S**econd-moments
+</h1>
 
 <p align="center">
   <i>Inferring phase dispersion in single-cell rhythms using the Method of Moments</i>
@@ -12,7 +13,7 @@
 
 ## 🧬 Overview
 
-**Orpheus** is a bioinformatics toolkit for estimating **phase dispersion** in rhythmic biological signals at the single-cell level. Inspired by the mythical musician Orpheus, this software brings mathematical harmony to the analysis of asynchronous cellular rhythms by applying a modern **Method of Moments** framework.
+**Orpheus** is a bioinformatics toolkit for estimating **phase dispersion** in rhythmic biological signals at the single-cell level. Inspired by the mythical musician Orpheus, this software brings mathematical harmony to the analysis of asynchronous cellular rhythms by applying a **Method of Moments** framework.
 
 The tool is designed for use with circadian gene expression data, and is suited for single-cell RNA sequencing datasets with multiple timepoints.
 

@@ -724,12 +724,13 @@ custom_colors <- c("AD" = "#cc3700", "CTL" = "#0094cc")
 
 oxphos_merged_phi_long = pivot_longer(oxphos_merged_phi, cols = -Row.names, names_to = c(".value", "condition"), names_pattern = "(.*)_(AD|CTL)") %>% mutate(condition = as.factor(condition))
 
-ggplot(oxphos_merged_phi_long, aes(condition, phi*12/pi, fill = condition))+
+phi_oxphos = ggplot(oxphos_merged_phi_long, aes(condition, phi*12/pi, fill = condition))+
  geom_boxplot(outliers = F)+
   theme_minimal()+
   xlab("Condition")+
   ylab("Prediceted phase std. (hrs)")+
-  geom_jitter(width = 0.1, alpha = 0.5) +
+  geom_point(alpha = 0.5) +
+  geom_line(aes(group = Row.names), alpha = 0.5)+
   scale_fill_manual(values = custom_colors) +
   theme(
     axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
@@ -739,6 +740,8 @@ ggplot(oxphos_merged_phi_long, aes(condition, phi*12/pi, fill = condition))+
     legend.title = element_text(size = 12),   # Increase legend title size
     legend.position = "none"
   )+ggtitle("Matched Oxphos genes in Exc35 CTL/AD Neurons")
+
+ggsave(filename = "~/Desktop/Exc35_oxphos_phis.pdf", plot = phi_oxphos, device = "pdf", width = 5, height = 5)
 ```
 
 ```{r}

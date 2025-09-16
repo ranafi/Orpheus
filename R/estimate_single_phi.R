@@ -38,7 +38,7 @@ objective <- function(params, data) {
 #'   \item `p`: The optimized single phi parameter.
 #' }
 #' @importFrom minpack.lm nls.lm
-#' @export
+#' @noRd
 estimate_single_phi <- function(measurement_data, initial_guess = c(p = 1.0)) {
   # Perform the optimization
   fit <- nls.lm(par = initial_guess, 
@@ -76,7 +76,7 @@ estimate_single_phi <- function(measurement_data, initial_guess = c(p = 1.0)) {
 #'   \item Bias-corrected and accelerated (BCa) CI
 #' }
 #' @importFrom boot boot boot.ci
-#' @export
+#' @noRd
 estimate_CI <- function(measurement_data, optimal_p, nPerms = 1000) {
 
 boot_fn <- function(data, indices) {
