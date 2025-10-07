@@ -346,7 +346,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     double_freq_acrophase = atan2(sin_coeff, cos_coeff) %% (2*pi) / 2
     var_double_freq_amp = sqrt(sin_coeff^2 + cos_coeff^2)
 
-    my_theme <- theme_minimal()+
+    my_theme <- theme_bw()+
       theme(
         axis.text.x = element_text(size = 14),    # Increase x-axis text size
         axis.text.y = element_text(size = 14),    # Increase y-axis text size
@@ -594,5 +594,5 @@ cycling_meta2d <- function(times, var_mat, mean_mat,
 }
 
 utils::globalVariables(c(
-  "gene_i", "all_of", "seurat_clusters", "nCount_RNA"
+  "gene_i", "all_of", "seurat_clusters", "nCount_RNA", "theme_bw", "theme", "element_text","pb_ideal", "var_ideal"
 ))

@@ -4,7 +4,17 @@
 \alias{plot_rhythms}
 \title{Plot Rhythms for Selected Genes}
 \usage{
-plot_rhythms(times, var_mat, mean_mat, plot_me = c(), time_units = "hrs")
+plot_rhythms(
+  times,
+  var_mat,
+  mean_mat,
+  plot_me = c(),
+  time_units = "hrs",
+  line_thickness = 1,
+  point_size = 3,
+  line_color = "red",
+  point_color = "blue"
+)
 }
 \arguments{
 \item{times}{A numeric vector of time points (e.g., ZT times, or radians).}
@@ -16,6 +26,14 @@ plot_rhythms(times, var_mat, mean_mat, plot_me = c(), time_units = "hrs")
 \item{plot_me}{A character vector of gene symbols to plot.}
 
 \item{time_units}{A string indicating the time units ("hrs" for hours or "radians" for radians). Default is "hrs".}
+
+\item{line_thickness}{A numeric value specifying the thickness of the lines in the plots. Default is 1.}
+
+\item{point_size}{A numeric value specifying the size of the points in the plots. Default is 3.}
+
+\item{line_color}{A string specifying the color of the lines in the plots. Default is "red".}
+
+\item{point_color}{A string specifying the color of the points in the plots. Default is "blue".}
 }
 \value{
 Generates side-by-side plots for pseudobulk expression and double-frequency variance for the selected genes.
