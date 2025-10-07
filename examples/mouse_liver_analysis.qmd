@@ -272,6 +272,7 @@ cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_n
 }))
 
 save(cos_phis_tmm, file = "~/Desktop/phis_2pr_4folds_unfilt.RData")
+load("../../figures/mouse_liver/two_pseudoreps_4Folds/phis_2pr_4folds_unfilt.RData")
 
 cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
 table(cos_phis_tmm_filt$Source)
@@ -687,10 +688,9 @@ write.table(hepa1MinusPericentral_rnk, file = "~/Desktop/Mouse_liver_hepa1MinusP
 ### Plot genes for celltypes
 
 ```{r}
-load("../../figures/mouse_liver/two_pseudoreps_4Folds/phis_2pr_4folds.RData")
 cell_type = "hepatocytes 1"
 
-plot_me = phis_consensus %>% filter(cell == cell_type & double_freq_p_statistic < 0.05) %>% arrange(double_freq_p_statistic) %>% distinct(Row.names) %>% slice(1:5) %>% unname %>% unlist
+plot_me = phis_seed_avg %>% filter(cell == cell_type & as.numeric(double_freq_p_statistic) < 0.05) %>% arrange(as.numeric(double_freq_p_statistic)) %>% distinct(Row.names) %>% slice(1:5) %>% unname %>% unlist
 
 tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T, num_replicates = 2, random_seed = 4)
 pb_mat = tmp[[1]]
@@ -700,7 +700,9 @@ var_mat = tmp[[2]]
 matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
 ZT = as.numeric(matches[,2])
 
-Orpheus::plot_rhythms(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs")
+#"#E69F00", "#56B4E9", "#F8766D","#F0E442"
+
+Orpheus::plot_rhythms(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs", point_color = "black", line_color = "#E69F00")
 ```
 
 ### Theta analysis

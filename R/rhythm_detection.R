@@ -9,6 +9,7 @@
 #' @importFrom patchwork wrap_plots
 #' @importFrom stats BIC
 #' @importFrom utils read.table
+#' @importFrom methods show
 NULL
 
 #' Detect Rhythmic Genes in Pseudobulk Data
@@ -371,7 +372,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     geom_line(data = pb_ideal_data, aes(x = times_ideal, y = pb_ideal), color = line_color, linewidth = line_thickness) + 
     labs(title = paste("PB Expression for", Gene_Symbols), 
           subtitle = paste("p-value:", round(pb_anova_results$`Pr(>F)`[2], 3), 
-                          ", acrophase:", round(pb_acro, 3)), 
+                          ", acrophase:", round(pb_acro_hrs, 3)), 
           x = "Time (hrs)", 
           y = "Bulk expression")+
     my_theme
@@ -388,7 +389,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     geom_line(data = var_ideal_data, aes(x = times_ideal, y = var_ideal), color = line_color, linewidth = line_thickness) + 
     labs(title = paste("Double Frequency Variance for", Gene_Symbols), 
           subtitle = paste("p-value:", round(var_anova_results$`Pr(>F)`[2], 3), 
-                          ", acrophase:", round(double_freq_acrophase, 3)), 
+                          ", acrophase:", round(double_freq_acrophase_hrs, 3)), 
           x = "Time (hrs)", 
           y = "12-hr component of var.")+
     my_theme
@@ -597,5 +598,5 @@ cycling_meta2d <- function(times, var_mat, mean_mat,
 }
 
 utils::globalVariables(c(
-  "gene_i", "all_of", "seurat_clusters", "nCount_RNA", "theme_bw", "theme", "element_text","pb_ideal", "var_ideal"
+  "gene_i", "all_of", "seurat_clusters", "nCount_RNA", "theme_bw", "theme", "element_text","pb_ideal", "var_ideal", "show"
 ))

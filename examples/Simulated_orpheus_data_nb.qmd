@@ -256,7 +256,6 @@ phi_acc_plot = ggplot(df_filt, aes(x = phi_true*12/pi,y =  phi*12/pi))+
   geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
   # stat_summary(fun = median, geom = "point", size = 2.5, color = "skyblue")+
   ggtitle("n=5000,m=10000,p_circ=.3,phi_sd=phi_sd,n_time_points=6,\namp_ratio_range=c(.3,0.75),G_range=c(.05,5),epsilon_sd=0.3,theta_range=c(0.01,2.5)")+
-  theme_minimal()+
   xlab("True phase std. (hrs)")+
   ylab("Prediceted phase std. (hrs)")+
   theme_bw()+
@@ -340,21 +339,22 @@ acrodiff_compare = ggplot(plot_acrodiff, aes(x = acrodiff*12/pi, fill = phi_true
   xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
   ylab("Count")+
   # ggtitle("n=5000,m=10000,p_circ=.2,n_time_points = 12,\nA_range=c(.1, 5),G_range = c(.1, 5),epsilon_sd = 2.0,\ntheta_range=c(0.1,1)")+
-  theme_minimal()+
-  theme(
+  theme_bw()+
+    theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
     axis.text.x = element_text(size = 14),    # Increase x-axis text size
     axis.text.y = element_text(size = 14),    # Increase y-axis text size
     axis.title.x = element_text(size = 16),   # Increase x-axis title size
     axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12),    # Increase legend title size
-    strip.text = element_text(size = 12)
-  ) + guides(fill = "none")+    # remove fill legend
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+
    # Use scale_x_continuous for precise control over the x-axis
   scale_x_continuous(
     limits = c(0, 12), 
     breaks = seq(0, 12, by = 4), 
     expand = c(0, 0)
-  )
+  )+guides(fill = "none")
 ggsave("~/Desktop/acrodiff_compare.pdf", plot = acrodiff_compare, width = 10, height = 4, units = "in")  
 
 ```
