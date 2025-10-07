@@ -687,7 +687,7 @@ write.table(hepa1MinusPericentral_rnk, file = "~/Desktop/Mouse_liver_hepa1MinusP
 ### Plot genes for celltypes
 
 ```{r}
-
+load("../../figures/mouse_liver/two_pseudoreps_4Folds/phis_2pr_4folds.RData")
 cell_type = "hepatocytes 1"
 
 plot_me = phis_consensus %>% filter(cell == cell_type & double_freq_p_statistic < 0.05) %>% arrange(double_freq_p_statistic) %>% distinct(Row.names) %>% slice(1:5) %>% unname %>% unlist
@@ -700,7 +700,7 @@ var_mat = tmp[[2]]
 matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
 ZT = as.numeric(matches[,2])
 
-plot_rhythms2(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs")
+Orpheus::plot_rhythms(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs")
 ```
 
 ### Theta analysis

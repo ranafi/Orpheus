@@ -320,6 +320,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     cat(paste("\nRunning regression assuming times are 0-2pi radians"))
     times1 <- times
   }
+  times1_hrs = times1 * 12 / pi
   
   # Subset to selected genes, ensuring matrices remain matrices
   gene1 <- gene1[, colnames(gene1) %in% plot_me, drop = FALSE]
@@ -334,6 +335,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     pb_model <- lm(m1 ~ sin(times1) + cos(times1))
     pb_anova_results = anova(pb_model_partial, pb_model)
     pb_acro = atan2(pb_model[["coefficients"]][["sin(times1)"]], pb_model[["coefficients"]][["cos(times1)"]]) %% (2*pi)
+    pb_acro_hrs = pb_acro * 12 / pi
     pb_amp = sqrt(pb_model[["coefficients"]][["sin(times1)"]]^2 + pb_model[["coefficients"]][["cos(times1)"]]^2)
     pb_intercept = pb_model[['coefficients']]["(Intercept)"]
 
@@ -344,6 +346,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     sin_coeff = var_model[["coefficients"]][["sin(2 * times1)"]]
     cos_coeff = var_model[["coefficients"]][["cos(2 * times1)"]]
     double_freq_acrophase = atan2(sin_coeff, cos_coeff) %% (2*pi) / 2
+    double_freq_acrophase_hrs = double_freq_acrophase * 12 / pi
     var_double_freq_amp = sqrt(sin_coeff^2 + cos_coeff^2)
 
     my_theme <- theme_bw()+
@@ -357,40 +360,40 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
       )
 
    # Data for plot 1 
-    pb_data <- data.frame(times1 = times1, m1 = m1) 
-    times_ideal <- seq(times1[1], times1[length(times1)], by = 0.1) 
+    pb_data <- data.frame(times1_hrs = times1_hrs, m1 = m1) 
+    times_ideal <- seq(times1_hrs[1], times1_hrs[length(times1_hrs)], by = 0.1) 
     pb_ideal_data <- data.frame(times_ideal = times_ideal, 
-                            pb_ideal = pb_amp * cos(times_ideal - pb_acro) + pb_intercept) 
+                            pb_ideal = pb_amp * cos((times_ideal - pb_acro_hrs)*(pi/12)) + pb_intercept) 
 
     # Create the ggplot object 
-    p1 <- ggplot(pb_data, aes(x = times1, y = m1)) + 
+    p1 <- ggplot(pb_data, aes(x = times1_hrs, y = m1)) + 
     geom_point(color = point_color, size = point_size) + 
     geom_line(data = pb_ideal_data, aes(x = times_ideal, y = pb_ideal), color = line_color, linewidth = line_thickness) + 
     labs(title = paste("PB Expression for", Gene_Symbols), 
           subtitle = paste("p-value:", round(pb_anova_results$`Pr(>F)`[2], 3), 
                           ", acrophase:", round(pb_acro, 3)), 
-          x = "Time (Rad)", 
+          x = "Time (hrs)", 
           y = "Bulk expression")+
     my_theme
 
     # Data for plot 2 
     circ <- gexp1 - design_matrix[, -c(2, 3)] %*% var_model[["coefficients"]][-c(2, 3)] 
-    var_data <- data.frame(times1 = times1, circ = circ) 
+    var_data <- data.frame(times1_hrs = times1_hrs, circ = circ) 
     var_ideal_data <- data.frame(times_ideal = times_ideal, 
-                              var_ideal = var_double_freq_amp * cos(2 * (times_ideal - double_freq_acrophase))) 
+                              var_ideal = var_double_freq_amp * cos(2 *(pi/12)*(times_ideal - double_freq_acrophase_hrs))) 
 
     # Create the ggplot object 
-    p2 <- ggplot(var_data, aes(x = times1, y = circ)) + 
+    p2 <- ggplot(var_data, aes(x = times1_hrs, y = circ)) + 
     geom_point(color = point_color, size = point_size) + 
     geom_line(data = var_ideal_data, aes(x = times_ideal, y = var_ideal), color = line_color, linewidth = line_thickness) + 
     labs(title = paste("Double Frequency Variance for", Gene_Symbols), 
           subtitle = paste("p-value:", round(var_anova_results$`Pr(>F)`[2], 3), 
                           ", acrophase:", round(double_freq_acrophase, 3)), 
-          x = "Time (Rad)", 
+          x = "Time (hrs)", 
           y = "12-hr component of var.")+
     my_theme
     
-    print(p1 + p2)
+    show(p1+p2)
       }
 }
 
