@@ -32,7 +32,44 @@ ZT = as.numeric(matches[,2])
 seurat_obj$ZT = ZT
 VlnPlot(seurat_obj, features = c("nCount_RNA"), group.by = "ZT")
 
+
 table(seurat_obj$seurat_clusters, seurat_obj$orig.ident)
+```
+
+### What are reasonable params for my simulated data?
+
+```{r}
+tmp = extract_clstr_prep_input(seurat_obj, cluster_id = "hepatocytes 2", normalize = F)
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+plot(log(means), log(vars))
+theta_estimate = data.frame(coarse_theta = (vars-means)/means^2)
+summary(theta_estimate$coarse_theta)
+summary(means)
+
+#Reasonable estimates for theta: 0.01 - 2.5
+quantile(theta_estimate$coarse_theta, probs = c(0.05, .95))
+
+#Reasonable range for gene means (G): 0.05 - 5
+quantile(means, probs = c(0.05, .95))
+
+cyclers = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
+cyclers$p_statistic = as.numeric(cyclers$p_statistic)
+
+#What fraction of genes should I make rhythmic? 0.3
+sig_cyclers = dplyr::filter(cyclers,p_statistic < 0.05)
+sig_cyclers %>% nrow / nrow(cyclers)
+
+#Reasonable range for cycling amplitude_ratio?: 0.3 - 0.75
+quantile(as.numeric(sig_cyclers$amp_ratio), probs = c(0.05, 0.95))
+
 ```
 
 ### Testing pseudoreplicate effect:
@@ -234,6 +271,7 @@ cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_n
   current_df
 }))
 
+save(cos_phis_tmm, file = "~/Desktop/phis_2pr_4folds_unfilt.RData")
 
 cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
 table(cos_phis_tmm_filt$Source)
@@ -262,51 +300,72 @@ phis_seed_avg <- phis_consensus %>%
     .groups = "drop"
   ) %>% filter(cell %in% c("hepatocytes 1","hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes"))
 
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
 
-custom_colors <- c("cholangiocytes" = "#F8766D", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#ABA300", "hepatocytes 2" = "#0CB702", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#8494FF", "periportal hepatocytes" = "#FF68A1")
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
 
-liver_phi_boxplot_pseudorep = ggplot(phis_seed_avg, aes(x = cell,y =  phi, fill = cell))+
+liver_phi_boxplot_pseudorep = ggplot(phis_seed_avg, aes(x = cell,y =  phi*12/pi, fill = cell))+
   geom_boxplot(outlier.shape = NA)+
   theme_minimal()+
   xlab("Cell type")+
-  ylab("Prediceted phase std. (rad)")+
-  geom_jitter(width = 0.1, alpha = 0.5) +
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(alpha = 0.5,
+      position = position_jitter(width = jitter_width, seed = jitter_seed)
+   ) +
   scale_fill_manual(values = custom_colors) +
+  theme_bw(base_size = 14) +
   theme(
-    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
     axis.text.y = element_text(size = 14),    # Increase y-axis text size
     axis.title.x = element_text(size = 16),   # Increase x-axis title size
     axis.title.y = element_text(size = 16),   # Increase y-axis title size
     legend.title = element_text(size = 12),   # Increase legend title size
-    legend.position = "none"
   )
 
-ggsave("~/Desktop/liver_phi_boxplot_pseudorep.pdf", liver_phi_boxplot_pseudorep, device = "pdf", width = 6, height = 5)
+ggsave("~/Desktop/liver_phi_boxplot_pseudorep.pdf", liver_phi_boxplot_pseudorep, device = "pdf", width = 8, heigh = 6)
 
 kruskal.test(phi ~ cell, data = phis_seed_avg)
 pairwise.wilcox.test(phis_seed_avg$phi, phis_seed_avg$cell,
                  p.adjust.method = "BH")
 
-acrodiff_compare_pseudorep = ggplot(phis_seed_avg, aes(x = acrodiff*12/pi)) +
-  geom_histogram(binwidth = 2, color = "black", fill = "steelblue") +
-  facet_wrap(~ as.factor(cell), scales = "free_y") +
+acrodiff_compare_pseudorep = ggplot(phis_seed_avg, aes(x = acrodiff*12/pi, fill = cell)) +
+  geom_histogram(binwidth = 2, color = "black", alpha = 1, breaks = seq(0, 12, by = 2)) +
+  facet_wrap(~ as.factor(cell), scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = custom_colors) +
+  guides(fill = "none") +    # remove fill legend
   xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
   ylab("Count")+
-   theme_minimal()+
+  theme_bw()+
   theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
     axis.text.x = element_text(size = 14),    # Increase x-axis text size
     axis.text.y = element_text(size = 14),    # Increase y-axis text size
     axis.title.x = element_text(size = 16),   # Increase x-axis title size
     axis.title.y = element_text(size = 16),   # Increase y-axis title size
     legend.title = element_text(size = 12)    # Increase legend title size
+  )+
+   # Use scale_x_continuous for precise control over the x-axis
+  scale_x_continuous(
+    limits = c(0, 12), 
+    breaks = seq(0, 12, by = 4), 
+    expand = c(0, 0)
   )
-ggsave("~/Desktop/acrodiff_compare_pseudorep.pdf", plot = acrodiff_compare_pseudorep, device = "pdf", width = 7, height = 7)
+
+ggsave("~/Desktop/acrodiff_compare_pseudorep.pdf", plot = acrodiff_compare_pseudorep, device = "pdf", width = 10, height = 4, units = "in") 
 
 
 gene_sets <- phis_seed_avg %>%
   group_by(cell) %>%
   summarise(genes = list(unique(Row.names))) %>%
   deframe()
+
+liver_venn = ggvenn::ggvenn(gene_sets, fill_color = c("#E69F00", "#56B4E9", "#F8766D","#F0E442"), fill_alpha = 0.5)
+ggsave("~/Desktop/liver_gene_Venn.pdf", plot = liver_venn, device = "pdf", width = 7, height = 7)
+
 
 #size of the intersect between all the cell types
 intersect_matrix <- outer(gene_sets, gene_sets,
@@ -633,7 +692,7 @@ cell_type = "hepatocytes 1"
 
 plot_me = phis_consensus %>% filter(cell == cell_type & double_freq_p_statistic < 0.05) %>% arrange(double_freq_p_statistic) %>% distinct(Row.names) %>% slice(1:5) %>% unname %>% unlist
 
-tmp = extract_clstr_prep_input2(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T, num_replicates = 2, random_seed = seed)
+tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T, num_replicates = 2, random_seed = 4)
 pb_mat = tmp[[1]]
 var_mat = tmp[[2]]
 
@@ -641,7 +700,43 @@ var_mat = tmp[[2]]
 matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
 ZT = as.numeric(matches[,2])
 
-plot_rhythms(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs")
+plot_rhythms2(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs")
+```
+
+### Theta analysis
+
+```{r}
+#Let's look at theta from when phi is calculable or from where double_freq_amplitude > V_2w_floor:
+
+theta_df = cos_phis_tmm %>% mutate(V_2w_floor = -(Ac^2/2)*theta) %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed") %>%
+  group_by(cell, Row.names) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+
+#Now phis_consensus has repeat genes for each "seed"
+#gene count by cell type:
+theta_df %>% group_by(cell) %>% summarize(n_genes = n_distinct(Row.names))
+
+pval_cols = c("p_statistic", "double_freq_p_statistic")
+theta_df_consensus <- theta_df %>%
+  select(!contains("acrophase") & !contains("AIC") & !contains("BIC")) %>%
+  group_by(cell, Row.names) %>%
+  summarise(
+    across(all_of(pval_cols), max, na.rm = TRUE),
+    across(where(is.numeric) & !all_of(pval_cols), \(x) mean(x, na.rm = T)),
+    cell = first(cell),
+    .groups = "drop"
+  ) %>% filter(!is.nan(phi) | (double_freq_amplitude < V_2w_floor)  )
+
+
+clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2",  "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
+
+theta_df_consensus = theta_df_consensus %>% mutate(clock_gene = toupper(Row.names) %in% clock_genes)
+
+theta_df_consensus 
+
 ```
 
 ```{r}

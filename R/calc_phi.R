@@ -7,7 +7,7 @@
 #' @param S_amp pseudobulk cycling amplitude.
 #' @param S_DC Mesor of the pseudobulk cycling.
 #' @return A numeric vector containing G (Mesor), Ac (Cell rhythm amplitude), and p (phase shift_standard_dev).
-#' @noRd
+#' @export
 find_analytic = function(V_2w, V_w, S_amp, S_DC){
   
   # Solve for G: trivial

@@ -5,7 +5,8 @@
 #' @importFrom utils write.table
 #' @importFrom MetaCycle meta2d
 #' @importFrom tools file_path_sans_ext
-#' @importFrom graphics lines par
+#' @importFrom ggplot2 ggplot aes geom_point geom_line labs
+#' @importFrom patchwork wrap_plots
 #' @importFrom stats BIC
 #' @importFrom utils read.table
 NULL
@@ -62,12 +63,12 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
     }
     
     anova_results = anova(partial_model, full_model)
-    sin_coff = full_model[["coefficients"]][["sin(times1)"]]
+    sin_coeff = full_model[["coefficients"]][["sin(times1)"]]
     cos_coeff = full_model[["coefficients"]][["cos(times1)"]]
-    acrophase_bulk = atan2(sin_coff, cos_coeff) %% (2*pi)
+    acrophase_bulk = atan2(sin_coeff, cos_coeff) %% (2*pi)
     
     p_statistic = anova_results$`Pr(>F)`[2]
-    amplitude_bulk = sqrt(sin_coff^2 + cos_coeff^2)
+    amplitude_bulk = sqrt(sin_coeff^2 + cos_coeff^2)
     
     mesor_bulk = full_model$coefficients[["(Intercept)"]]
     
@@ -76,7 +77,7 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
     
     
     gene_summary = cbind( Gene_Symbols, acrophase_bulk,amplitude_bulk,
-              p_statistic, amp_ratio, sin_coff, cos_coeff, mesor_bulk,
+              p_statistic, amp_ratio, sin_coeff, cos_coeff, mesor_bulk,
               partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC)
     
     return(gene_summary)
@@ -85,7 +86,7 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
   all_genes = as_tibble(all_genes)
   colnames(all_genes) <- c(
     "Gene_Symbols", "acrophase_bulk","amplitude_bulk",
-    "p_statistic", "amp_ratio", "sin_coff", "cos_coeff", "mesor_bulk",
+    "p_statistic", "amp_ratio", "sin_coeff", "cos_coeff", "mesor_bulk",
     "partial_model_AIC", "full_model_AIC", "partial_model_BIC", "full_model_BIC")
   all_genes = drop_na(all_genes)
   all_genes$BHQ = p.adjust(as.numeric(all_genes$p_statistic), "BH")
@@ -153,9 +154,9 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     }
     
     anova_results = anova(partial_model, full_model)
-    sin_coff = full_model[["coefficients"]][["sin(2 * times1)"]]
+    sin_coeff = full_model[["coefficients"]][["sin(2 * times1)"]]
     cos_coeff = full_model[["coefficients"]][["cos(2 * times1)"]]
-    double_freq_acrophase = atan2(sin_coff, cos_coeff) %% (2*pi) / 2
+    double_freq_acrophase = atan2(sin_coeff, cos_coeff) %% (2*pi) / 2
 
     #What is the amplitude of the fundamental according to the double frequency model?
     find_Af = lm(full_model$coefficients[["m1"]]*m1 ~ cos(times1) + sin(times1))
@@ -164,7 +165,7 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     
     
     double_freq_p_statistic = anova_results$`Pr(>F)`[2]
-    raw_2w_amp = sqrt(sin_coff^2 + cos_coeff^2)
+    raw_2w_amp = sqrt(sin_coeff^2 + cos_coeff^2)
 
     # #Calculate the 95% CI for double frequency phase
     # if(double_freq_amplitude > 1e-3){
@@ -183,7 +184,7 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
     # }
     
     #Amp of double frequency variance wave projected onto expected bulk wave.
-    double_freq_amplitude = -cos_coeff * cos(2 * phase_bulk) - sin_coff * sin(2 * phase_bulk)
+    double_freq_amplitude = -cos_coeff * cos(2 * phase_bulk) - sin_coeff * sin(2 * phase_bulk)
 
     #MESOR or mean of the fitted variance wave
     # var_mesor = mean( full_model$fitted.values)
@@ -301,9 +302,13 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
 #' @param mean_mat A matrix of mean expression data (genes x samples).
 #' @param plot_me A character vector of gene symbols to plot.
 #' @param time_units A string indicating the time units ("hrs" for hours or "radians" for radians). Default is "hrs".
+#' @param line_thickness A numeric value specifying the thickness of the lines in the plots. Default is 1.
+#' @param point_size A numeric value specifying the size of the points in the plots. Default is 3.
+#' @param line_color A string specifying the color of the lines in the plots. Default is "red".
+#' @param point_color A string specifying the color of the points in the plots. Default is "blue".
 #' @return Generates side-by-side plots for pseudobulk expression and double-frequency variance for the selected genes.
 #' @export
-plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "hrs") {
+plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "hrs", line_thickness = 1, point_size = 3, line_color = "red", point_color = "blue") {
   `%do%` <- foreach::`%do%`
   gene1 <- t(var_mat)  # get the transpose, subjects x genes and put in order of CYCLOPS order
   means1 <- t(mean_mat)
@@ -336,34 +341,57 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
     var_model <- lm(gexp1 ~ sin(2 * times1) + cos(2 * times1) + m1)
     design_matrix <- model.matrix(gexp1 ~ sin(2 * times1) + cos(2 * times1) + m1)
     var_anova_results = anova(var_partial, var_model)
-    sin_coff = var_model[["coefficients"]][["sin(2 * times1)"]]
+    sin_coeff = var_model[["coefficients"]][["sin(2 * times1)"]]
     cos_coeff = var_model[["coefficients"]][["cos(2 * times1)"]]
-    double_freq_acrophase = atan2(sin_coff, cos_coeff) %% (2*pi) / 2
-    var_double_freq_amp = sqrt(sin_coff^2 + cos_coeff^2)
+    double_freq_acrophase = atan2(sin_coeff, cos_coeff) %% (2*pi) / 2
+    var_double_freq_amp = sqrt(sin_coeff^2 + cos_coeff^2)
 
-    # 2 plots side by side
-    par(mfrow = c(1, 2))  # 1 row, 2 columns
+    my_theme <- theme_minimal()+
+      theme(
+        axis.text.x = element_text(size = 14),    # Increase x-axis text size
+        axis.text.y = element_text(size = 14),    # Increase y-axis text size
+        axis.title.x = element_text(size = 16),   # Increase x-axis title size
+        axis.title.y = element_text(size = 16),   # Increase y-axis title size
+        legend.title = element_text(size = 12),    # Increase legend title size
+        strip.text = element_text(size = 12)
+      )
 
-    # Plot pseudobulk expression
-    plot(times1, m1, xlab = "Time (Rad)", ylab = "PB expression",
-         main = paste("PB Expression for", Gene_Symbols),
-         sub= paste("p-value:", round(pb_anova_results$`Pr(>F)`[2], 3), ", acrophase:", round(pb_acro, 3)),
-         pch = 19, col = "blue")
-    times_ideal = seq(times1[1], times1[length(times1)], by = 0.1)
-    pb_ideal = pb_amp * cos(times_ideal - pb_acro) + pb_intercept
-    lines(times_ideal, pb_ideal, col = "red")
+   # Data for plot 1 
+    pb_data <- data.frame(times1 = times1, m1 = m1) 
+    times_ideal <- seq(times1[1], times1[length(times1)], by = 0.1) 
+    pb_ideal_data <- data.frame(times_ideal = times_ideal, 
+                            pb_ideal = pb_amp * cos(times_ideal - pb_acro) + pb_intercept) 
 
-    # Plot double-frequency variance
-    circ <- gexp1 - design_matrix[, -c(2, 3)] %*% var_model[["coefficients"]][-c(2, 3)]
-    plot(times1, circ, xlab = "Time (Rad)", ylab = "Double freq component of var",
-         main = paste("Double Frequency Variance for", Gene_Symbols),
-         sub = paste("p-value:", round(var_anova_results$`Pr(>F)`[2], 3), ", acrophase:", round(double_freq_acrophase, 3)),
-         pch = 19,
-         col = "blue")
-    circ_fit <- var_model$fitted.values - design_matrix[, -c(2, 3)] %*% var_model[["coefficients"]][-c(2, 3)]
-    var_ideal = var_double_freq_amp * cos(2 * (times_ideal - double_freq_acrophase))
-    lines(times_ideal, var_ideal, col = "red")
-  }
+    # Create the ggplot object 
+    p1 <- ggplot(pb_data, aes(x = times1, y = m1)) + 
+    geom_point(color = point_color, size = point_size) + 
+    geom_line(data = pb_ideal_data, aes(x = times_ideal, y = pb_ideal), color = line_color, linewidth = line_thickness) + 
+    labs(title = paste("PB Expression for", Gene_Symbols), 
+          subtitle = paste("p-value:", round(pb_anova_results$`Pr(>F)`[2], 3), 
+                          ", acrophase:", round(pb_acro, 3)), 
+          x = "Time (Rad)", 
+          y = "Bulk expression")+
+    my_theme
+
+    # Data for plot 2 
+    circ <- gexp1 - design_matrix[, -c(2, 3)] %*% var_model[["coefficients"]][-c(2, 3)] 
+    var_data <- data.frame(times1 = times1, circ = circ) 
+    var_ideal_data <- data.frame(times_ideal = times_ideal, 
+                              var_ideal = var_double_freq_amp * cos(2 * (times_ideal - double_freq_acrophase))) 
+
+    # Create the ggplot object 
+    p2 <- ggplot(var_data, aes(x = times1, y = circ)) + 
+    geom_point(color = point_color, size = point_size) + 
+    geom_line(data = var_ideal_data, aes(x = times_ideal, y = var_ideal), color = line_color, linewidth = line_thickness) + 
+    labs(title = paste("Double Frequency Variance for", Gene_Symbols), 
+          subtitle = paste("p-value:", round(var_anova_results$`Pr(>F)`[2], 3), 
+                          ", acrophase:", round(double_freq_acrophase, 3)), 
+          x = "Time (Rad)", 
+          y = "12-hr component of var.")+
+    my_theme
+    
+    print(p1 + p2)
+      }
 }
 
 

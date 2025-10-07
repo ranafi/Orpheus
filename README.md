@@ -2,7 +2,7 @@
   <img src="man/figures/full_logo.png" alt="Orpheus Logo" width="200"/>
 </p>
 
-<h1 align="center">**O**scillatory **R**hythm and **P**hase **H**eterogeneity **E**xtraction **U**sing **S**econd-moments
+<h1 align="center">**O**scillatory **R**hythm **P**hase **H**eterogeneity **E**stimated **U**sing **S**tatistical-moments
 </h1>
 
 <p align="center">

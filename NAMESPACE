@@ -2,6 +2,7 @@
 
 export(calc_phi)
 export(extract_clstr_prep_input)
+export(find_analytic)
 export(is_cycling)
 export(plot_rhythms)
 export(var_cycling)

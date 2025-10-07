@@ -20,7 +20,9 @@ Imports:
     tidyr,
     Matrix,
     MetaCycle,
-    edgeR
+    edgeR,
+    ggplot2,
+    patchwork
 RoxygenNote: 7.3.2
 Suggests: 
     testthat (>= 3.0.0)

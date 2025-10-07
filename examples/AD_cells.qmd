@@ -1,10 +1,10 @@
 ---
-title: "subject_variance_by_phase"
+title: "Orpheus on AD ROSMAP data"
 format: html
 editor: visual
 ---
 
-Read in variance by subject:
+### Read in exc3.5 CTL cells
 
 ```{r}
 library(tidyverse)
@@ -18,6 +18,11 @@ file = c("../examples/exc35_ctl.h5Seurat")
 # file = "mglia_ctl.h5Seurat"
   
 seurat_obj_ctl = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
+
+# Identify mitochondrial genes
+mt_genes_ctl <- grep("^MT-", rownames(seurat_obj_ctl), value = TRUE)
+# Subset to exclude them
+seurat_obj_ctl <- seurat_obj_ctl[!rownames(seurat_obj_ctl) %in% mt_genes_ctl, ]
   
 VlnPlot(seurat_obj_ctl, features = "nCount_RNA", group.by = "times")
 
@@ -191,6 +196,8 @@ theta_plot= ggplot(output, aes(x = coarse_theta, y = theta)) +
 ggsave("~/Desktop/exc35_ctl_theta_measured_v_pred.pdf", theta_plot, device = "pdf", width = 6.5, height = 5)
 ```
 
+### Read in exc35 AD cells
+
 ```{r}
 file = c("../examples/exc35_ad.h5Seurat")
 # file = c("../examples/inhib_ad.h5Seurat")
@@ -199,6 +206,10 @@ file = c("../examples/exc35_ad.h5Seurat")
 
 seurat_obj_ad = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
   
+# Identify mitochondrial genes
+mt_genes_ad <- grep("^MT-", rownames(seurat_obj_ad), value = TRUE)
+# Subset to exclude them
+seurat_obj_ad <- seurat_obj_ad[!rownames(seurat_obj_ad) %in% mt_genes_ad, ]
 
 seurat_obj_ad$seurat_clusters = "0"
 seurat_obj_ad$orig.ident = seurat_obj_ad$individualID
@@ -362,6 +373,8 @@ ad_ctl_phi_compare = ggplot(merged_phi_long, aes(x = condition,y =  phi*12/pi, f
 ggsave("~/Desktop/paired_ad_ctl_phis.pdf", ad_ctl_phi_compare, device = "pdf", width = 5, height = 5)
 ```
 
+### Custom Cycling functions to account for batch, sex, pmi
+
 ```{r}
 
 is_cycling_custom <- function(times, pb_mat,meta_data, time_units = "hrs") {
@@ -522,7 +535,7 @@ var_cycling_custom <- function(times, var_mat, mean_mat, phase_pb,meta_data, tim
 }
 ```
 
-Use custom functions from above:
+### Apply custom functions from above:
 
 ```{r}
 meta_ad = seurat_obj_ad@meta.data
@@ -604,34 +617,129 @@ pb_cycling_ctl_custom %>% filter(BHQ < 0.1 & amp_ratio >= 0.2) %>% select(amplit
 pb_cycling_ad_custom %>% filter(BHQ < 0.1 & amp_ratio >= 0.2) %>% select(amplitude_bulk) %>% unlist %>% unname %>% as.numeric %>% hist(, xlim = c(0,2), breaks = seq(0, 100, by = 0.2), main = "bulk amplitude ad cells")
 ```
 
+### Plotting
+
 ```{r}
-wilcox.test(phi_ctl_cust$phi, phi_ad_cust$phi)
-boxplot(phi_ctl_cust$phi, phi_ad_cust$phi)
+library(ggpubr)
+library(ggrepel)
+library(tidyverse)
 
-# merged_phi = merge(phi_ctl_cust, phi_ad_cust, by = 0, suffixes = c("_CTL", "_AD")) %>% left_join(select(pb_cycling_ad_custom, Gene_Symbols, amplitude_bulk), by= join_by("Row.names"=="Gene_Symbols")) %>% rename("amplitude_bulk_AD"="amplitude_bulk") %>% left_join(select(pb_cycling_ctl_custom, Gene_Symbols, amplitude_bulk), by= join_by("Row.names"=="Gene_Symbols")) %>% rename("amplitude_bulk_CTL"="amplitude_bulk")
+clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2", "HLF", "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
+oxphos = c("ATP12A", "ATP4A", "ATP4B", "ATP5F1A", "ATP5F1B", "ATP5F1C", "ATP5F1D", "ATP5F1E", "ATP5MC1", "ATP5MC1P5",
+"ATP5MC2", "ATP5MC3", "ATP5ME", "ATP5MF", "ATP5MG", "ATP5PB", "ATP5PD", "ATP5PF", "ATP5PO", "ATP6AP1",
+"ATP6V0A1", "ATP6V0A2", "ATP6V0A4", "ATP6V0B", "ATP6V0C", "ATP6V0D1", "ATP6V0D2", "ATP6V0E1", "ATP6V0E2",
+"ATP6V1A", "ATP6V1B1", "ATP6V1B2", "ATP6V1C1", "ATP6V1C2", "ATP6V1D", "ATP6V1E1", "ATP6V1E2", "ATP6V1F",
+"ATP6V1G1", "ATP6V1G2", "ATP6V1G3", "ATP6V1H", "COX10", "COX11", "COX15", "COX17", "COX4I1", "COX4I2",
+"COX5A", "COX5B", "COX6A1", "COX6A2", "COX6B1", "COX6B2", "COX6C", "COX6CP3", "COX7A1", "COX7A2",
+"COX7A2L", "COX7B", "COX7B2", "COX7C", "COX8A", "COX8C", "CYC1", "LHPP", "MT-ATP6", "MT-ATP8",
+"MT-CO1", "MT-CO2", "MT-CO3", "MT-CYB", "MT-ND1", "MT-ND2", "MT-ND3", "MT-ND4", "MT-ND4L", 
+"MT-ND5", "MT-ND6", "NDUFA1", "NDUFA10", "NDUFA11", "NDUFA2", "NDUFA3", "NDUFA4", "NDUFA4L2",
+"NDUFA5", "NDUFA6", "NDUFA7", "NDUFA8", "NDUFA9", "NDUFAB1", "NDUFB1", "NDUFB10", "NDUFB2",
+"NDUFB3", "NDUFB4", "NDUFB5", "NDUFB6", "NDUFB7", "NDUFB8", "NDUFB9", "NDUFC1", "NDUFC2",
+"NDUFS1", "NDUFS2", "NDUFS3", "NDUFS4", "NDUFS5", "NDUFS6", "NDUFS7", "NDUFS8", "NDUFV1",
+"NDUFV2", "NDUFV3", "PPA1", "PPA2", "SDHA", "SDHB", "SDHC", "SDHCP5", "SDHD", "TCIRG1",
+"UQCR10", "UQCR10P1", "UQCR11", "UQCRB", "UQCRC1", "UQCRC2", "UQCRFS1", "UQCRH", "UQCRHL", "UQCRQ")
 
+combined_df <- data.frame(
+  Row.names = c(rownames(phi_ad_cust), rownames(phi_ctl_cust)),
+  phi = c(phi_ad_cust$phi*12/pi, phi_ctl_cust$phi*12/pi),
+  condition = c(rep("AD", nrow(phi_ad_cust)), rep("CTL", nrow(phi_ctl_cust)))
+)
+ribo_genes = combined_df$Row.names[grep("RP[SL]", combined_df$Row.names)]
+
+
+combined_df$clock_genes <- ifelse(toupper(combined_df$Row.names) %in% clock_genes, combined_df$Row.names, NA)
+combined_df$oxphos_genes <- ifelse(toupper(combined_df$Row.names) %in% oxphos, combined_df$Row.names, NA)
+combined_df$ribo_genes <- ifelse(toupper(combined_df$Row.names) %in% ribo_genes, combined_df$Row.names, NA)
+
+# Perform the Wilcoxon Rank Sum test
+wilcox_result <- wilcox.test(phi ~ condition, data = combined_df)
+print(wilcox_result)
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+
+# Define a colorpallete
+color_palette <- c("CTL" = "skyblue", "AD" = "salmon")
+
+# Create the plot
+p <- ggplot(combined_df, aes(x = condition, y = phi, fill = condition)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = condition, y = phi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("CTL", "AD")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 10, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "Phase Dispersion is Increased in AD Neurons",
+    y = "Phase Dispersion (hrs)",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )
+
+# Display the plot
+print(p)
+ggsave("~/Desktop/phi_boxplot_NOTmatched.pdf",p, device = "pdf", width = 5, height = 5 )
+############## PAIRWISE BOXPLOT #################
 merged_phi = merge(output_ctl_cust, output_ad_cust, by = "Row.names", suffixes = c("_CTL", "_AD"))
 
 plot_df_long = pivot_longer(merged_phi, cols = -Row.names, names_to = c(".value", "condition"), names_pattern = "(.*)_(AD|CTL)") %>% mutate(condition = as.factor(condition))
 
-custom_colors <- c("AD" = "#cc3700", "CTL" = "#0094cc")
+plot_df_long$oxphos_genes <- ifelse(plot_df_long$Row.names %in% oxphos, plot_df_long$Row.names, NA)
+
 
 matched_phi_boxplot = ggplot(plot_df_long, aes(condition, phi*12/pi, fill = condition))+
  geom_boxplot(outliers = F)+
   theme_minimal()+
   xlab("Condition")+
   ylab("Prediceted phase std. (hrs)")+
-  geom_jitter(width = 0.1, alpha = 0.5) +
-  scale_fill_manual(values = custom_colors) +
+  geom_jitter(
+  aes(x = condition, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("CTL", "AD")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 10, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  theme_bw(base_size = 14) +
   theme(
-    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
     axis.text.y = element_text(size = 14),    # Increase y-axis text size
     axis.title.x = element_text(size = 16),   # Increase x-axis title size
     axis.title.y = element_text(size = 16),   # Increase y-axis title size
     legend.title = element_text(size = 12),   # Increase legend title size
-    legend.position = "none"
   )
-
 ggsave("~/Desktop/matched_phi_boxplot.pdf",matched_phi_boxplot, device = "pdf", width = 5, height = 5 )
 
 wilcox.test(merged_phi$phi_CTL, merged_phi$phi_AD, paired = T)
@@ -644,7 +752,7 @@ matches_Ac_boxplot = ggplot(plot_df_long, aes(condition, log(Ac), fill = conditi
   xlab("Condition")+
   ylab("Log(cell rhythm amp.)")+
   geom_jitter(width = 0.1, alpha = 0.5) +
-  scale_fill_manual(values = custom_colors) +
+  scale_fill_manual(values = color_palette) +
   theme(
     axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
     axis.text.y = element_text(size = 14),    # Increase y-axis text size
@@ -662,7 +770,7 @@ matches_pbAmp_boxplot = ggplot(plot_df_long, aes(condition, log(as.numeric(ampli
   xlab("Condition")+
   ylab("Log(PB rhythm amp.)")+
   geom_jitter(width = 0.1, alpha = 0.5) +
-  scale_fill_manual(values = custom_colors) +
+  scale_fill_manual(values = color_palette) +
   theme(
     axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
     axis.text.y = element_text(size = 14),    # Increase y-axis text size
@@ -675,20 +783,89 @@ matches_pbAmp_boxplot = ggplot(plot_df_long, aes(condition, log(as.numeric(ampli
 ggsave("~/Desktop/matched_pbAmp_boxplot.pdf",matches_pbAmp_boxplot, device = "pdf", width = 5, height = 5 )
 
 
-acrodiff_compare = ggplot(plot_df_long, aes(x = acrodiff*12/pi)) +
-  geom_histogram(binwidth = 2, color = "black", fill = "steelblue") +
+acrodiff_compare = ggplot(plot_df_long, aes(x = acrodiff*12/pi, fill = condition)) +
+  geom_histogram(binwidth = 2, color = "black", alpha = 1) +
   facet_wrap(~ as.factor(condition), scales = "free_y") +
+  scale_fill_manual(values = color_palette) +
+  guides(fill = "none") +    # remove fill legend
   xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
   ylab("Count")+
-   theme_minimal()+
+  theme_bw()+
   theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+
+   # Use scale_x_continuous for precise control over the x-axis
+  scale_x_continuous(
+    limits = c(0, 12), 
+    breaks = seq(0, 12, by = 3), 
+    expand = c(0, 0)
+  )
+ggsave("~/Desktop/acrodiff_compare.pdf", plot = acrodiff_compare, device = "pdf", width = 7, height = 5)
+
+# Scatter plot showing matched phis, as opposed to boxplot:
+# Calculate summary statistics for annotation
+merged_phi_filt = filter(merged_phi, !is.nan(phi_CTL) & !is.nan(phi_AD))
+num_genes <- nrow(merged_phi_filt)
+num_increased <- sum(merged_phi_filt$phi_AD > merged_phi_filt$phi_CTL)
+percent_increased <- round(100 * num_increased / num_genes, 1)
+
+merged_phi_wilcox_test = wilcox.test(merged_phi_filt$phi_CTL, merged_phi_filt$phi_AD, paired = T)
+
+# Create a text label for the plot
+stats_label <- sprintf(
+  "Paired Wilcoxon, p = %.2e\n%d / %d genes (%s%%) genes increase phase disp. in AD",
+  merged_phi_wilcox_test$p.value,
+  num_increased,
+  num_genes,
+  percent_increased
+)
+
+# Find limits for a square plot
+max_val <- max(c(merged_phi_filt$phi_CTL*12/pi, merged_phi_filt$phi_AD*12/pi), na.rm = TRUE) * 1.1
+
+p_scatter <- ggplot(merged_phi_filt, aes(x = phi_CTL*12/pi, y = phi_AD*12/pi)) +
+  # The line of identity (y=x). This is the most important reference.
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  # The data points. Use some transparency.
+  geom_point(alpha = 0.4, size = 2.5, color = "grey50") + # Using the AD color from before
+  # Add the statistical annotation
+  # Place it in a corner of the plot
+  annotate(
+    "text", 
+    x = 0, 
+    y = max_val, 
+    label = stats_label, 
+    hjust = 0, 
+    vjust = 1, 
+    size = 3,
+    fontface = "bold"
+  ) +
+  # Force the plot to be square for easy comparison to the y=x line
+  coord_fixed(xlim = c(0, max_val), ylim = c(0, max_val)) +
+  # Labels and theme
+  labs(
+    title = "Systematic Increase in Phase Dispersion in AD Neurons",
+    x = "Phase Dispersion (hrs) in CTL",
+    y = "Phase Dispersion (hrs) in AD"
+  ) +
+  theme_bw()+
+  theme(
+    strip.text = element_text(color = "black", size = 12),
     axis.text.x = element_text(size = 14),    # Increase x-axis text size
     axis.text.y = element_text(size = 14),    # Increase y-axis text size
     axis.title.x = element_text(size = 16),   # Increase x-axis title size
     axis.title.y = element_text(size = 16),   # Increase y-axis title size
     legend.title = element_text(size = 12)    # Increase legend title size
   )
-ggsave("~/Desktop/acrodiff_compare.pdf", plot = acrodiff_compare, device = "pdf", width = 7, height = 5)
+
+print(p_scatter)
+ggsave("~/Desktop/matched_phi_scatter.pdf", plot = p_scatter, device = "pdf", width = 5, height = 5)
 
 
 save(merged_phi, file = "~/Desktop/Exc35_merged_phi.RData")
@@ -699,7 +876,7 @@ save(phi_ctl_cust, file = "~/Desktop/Exc35_CTL_phi_df.RData")
 KEGG oxphos genes
 
 ```{r}
-#Note, genes are not mapped to MSIGDB so there is chance of name mismatch in current code below:
+
 pathway = c("ATP12A", "ATP4A", "ATP4B", "ATP5F1A", "ATP5F1B", "ATP5F1C", "ATP5F1D", "ATP5F1E", "ATP5MC1", "ATP5MC1P5",
 "ATP5MC2", "ATP5MC3", "ATP5ME", "ATP5MF", "ATP5MG", "ATP5PB", "ATP5PD", "ATP5PF", "ATP5PO", "ATP6AP1",
 "ATP6V0A1", "ATP6V0A2", "ATP6V0A4", "ATP6V0B", "ATP6V0C", "ATP6V0D1", "ATP6V0D2", "ATP6V0E1", "ATP6V0E2",
@@ -770,4 +947,25 @@ write.table(CTL_rnk, file = "~/Desktop/rosmap_exc35_CTLphi.rnk",
                   col.names = FALSE,
                   sep = "\t",
                   quote = F)
+```
+
+Theta analysis
+
+```{r}
+phi_ad_cust  = phi_ad_cust %>% rownames_to_column(var = "gene")
+phi_ctl_cust = phi_ctl_cust %>% rownames_to_column(var = "gene")
+
+res = bind_rows(list(AD = phi_ad_cust, CTL = phi_ctl_cust), .id = "cond")
+
+#Let's look at theta from when phi is calculable or from where double_freq_amplitude > V_2w_floor:
+
+theta_df = res %>% mutate(V_2w_floor = -(Ac^2/2)*theta)
+
+
+clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2",  "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
+
+theta_df = theta_df %>% mutate(clock_gene = gene %in% clock_genes)
+
+theta_df_consensus 
+
 ```

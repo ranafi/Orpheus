@@ -118,226 +118,6 @@ Load prepared seurat object:
 
 ```{r}
 load("../../Mouse_SCN/mouse_SCN_seurat_obj.RData")
-
-
-
-```
-
-```{r}
-# 
-# library(Seurat)
-# library(dplyr)
-# library(randomForest)
-# library(ggplot2)
-# 
-# 
-# obj = combined
-# 
-# # ---- Tunables (adjust to taste) ----
-# mito_max      <- 5
-# min_genes     <- 200
-# train_min     <- 800
-# n_hvgs        <- 2000
-# n_pcs         <- 30
-# cluster_res   <- 0.6
-# tsne_perp     <- 30
-# rf_trees      <- 1000
-# seed          <- 1234
-# 
-# set.seed(seed)
-# 
-# #percent mito
-# obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^mt-")
-# 
-# # ---- Split into training vs projection by nFeature_RNA ----
-# training <- subset(obj, subset = nFeature_RNA >= train_min)
-# projection <- subset(obj, subset = nFeature_RNA < train_min & nFeature_RNA > min_genes)
-# 
-# # ---- Mitochondrial filtering on both sets ----
-# training <- subset(training, subset = percent.mt <= mito_max)
-# projection <- subset(projection, subset = percent.mt <= mito_max)
-# 
-# message(sprintf("Training cells: %d | Projection cells: %d",
-#                 ncol(training), ncol(projection)))
-# 
-# # ---- Normalize + HVGs on training only (to match paper’s flow) ----
-# training <- NormalizeData(training, normalization.method = "LogNormalize")
-# training <- FindVariableFeatures(training, selection.method = "vst", nfeatures = n_hvgs)
-# training <- ScaleData(training, features = VariableFeatures(training), vars.to.regress = "percent.mt")
-# training <- RunPCA(training, features = VariableFeatures(training), npcs = n_pcs, verbose = FALSE)
-# 
-# # ---- Graph clustering with SLM (smart local moving) ----
-# training <- FindNeighbors(training, dims = 1:n_pcs)
-# training <- FindClusters(training, resolution = cluster_res, algorithm = 3, random.seed = seed) # algorithm=3 = SLM
-# training <- RunTSNE(training, dims = 1:n_pcs, perplexity = tsne_perp)
-# 
-# # cluster labels live in training$seurat_clusters
-# DimPlot(training, reduction = "tsne", label = TRUE) + ggtitle("Training set clusters (t-SNE)")
-# 
-# # ---- Prepare projection set on the same features/space ----
-# # Normalize/scale using the same HVG set to align with training feature space
-# hvg <- VariableFeatures(training)
-# projection <- NormalizeData(projection)
-# projection <- ScaleData(projection, features = hvg, vars.to.regress = "percent.mt")
-# projection <- RunPCA(projection, features = hvg, npcs = n_pcs, verbose = FALSE)
-# 
-# # ---- Random forest: train on training PCA, predict for projection ----
-# x_train <- Embeddings(training, "pca")[, 1:n_pcs, drop = FALSE]
-# y_train <- factor(training$seurat_clusters)
-# 
-# rf <- randomForest(x = x_train, y = y_train, ntree = rf_trees, importance = FALSE)
-# proj_pred <- predict(rf, newdata = Embeddings(projection, "pca")[, 1:n_pcs, drop = FALSE], type = "vote")
-# proj_call <- colnames(proj_pred)[max.col(proj_pred, ties.method = "first")]
-# 
-# projection$rf_cluster <- factor(proj_call, levels = levels(y_train))
-# projection$rf_maxvote <- apply(proj_pred, 1, max)
-# 
-# # ---- Optional: joint visualization (run t-SNE on combined PCA for a single map) ----
-# # Recreate a combined object using the same HVGs and PCs for both sets
-# xy_combined <- merge(training, projection)
-# xy_combined <- ScaleData(xy_combined, features = hvg, vars.to.regress = "percent.mt", verbose = FALSE)
-# xy_combined <- RunPCA(xy_combined, features = hvg, npcs = n_pcs, verbose = FALSE)
-# xy_combined <- RunTSNE(xy_combined, dims = 1:n_pcs, perplexity = tsne_perp)
-# 
-# # Carry cluster labels (training) and RF labels (projection) onto combined object
-# xy_combined$label_for_plot <- NA
-# xy_combined$label_for_plot[colnames(training)] <- paste0("Train_", training$seurat_clusters)
-# xy_combined$label_for_plot[colnames(projection)] <- paste0("Proj_", projection$rf_cluster)
-# 
-# DimPlot(xy_combined, reduction = "tsne", group.by = "label_for_plot", label = FALSE, shuffle = TRUE) +
-#   ggtitle("Training clusters + projected cells (RF)")
-# 
-# # ---- 6-fold subset validation (like Extended Data Fig. 1b) ----
-# # Reference = full training RF predictions on projection set (proj_call)
-# ref_proj_call <- projection$rf_cluster
-# 
-# K <- 6
-# folds <- sample(rep(1:K, length.out = length(y_train)))
-# 
-# match_rate_by_fold <- numeric(K)
-# match_rate_by_cluster <- vector("list", K)
-# 
-# for (k in 1:K) {
-#   idx <- which(folds == k)
-#   x_sub <- x_train[idx, , drop = FALSE]
-#   y_sub <- y_train[idx]
-#   rf_k <- randomForest(x = x_sub, y = y_sub, ntree = rf_trees)
-#   pred_k <- predict(rf_k, newdata = Embeddings(projection, "pca")[, 1:n_pcs, drop = FALSE])
-#   # Compare projection labels from subset-vs-full classifiers
-#   matches <- pred_k == ref_proj_call
-#   match_rate_by_fold[k] <- mean(matches)
-#   # per-cluster agreement (by full-set label)
-#   per_cl <- tapply(matches, ref_proj_call, mean) #means here [0-1] show if cluster "ref numer" agrees with cluster "fold predicted number"
-#   match_rate_by_cluster[[k]] <- per_cl
-# }
-# 
-# # Summaries
-# overall_consistency <- data.frame(
-#   fold = 1:K,
-#   match_rate = match_rate_by_fold
-# )
-# 
-# print(overall_consistency)
-# 
-# # Aggregate per-cluster consistency across folds
-# all_clusters <- sort(unique(ref_proj_call))
-# per_cluster_mat <- sapply(1:K, function(k) {
-#   x <- match_rate_by_cluster[[k]]
-#   setNames(x[all_clusters], all_clusters)
-# })
-# per_cluster_df <- data.frame(
-#   cluster = all_clusters,
-#   consistency = rowMeans(per_cluster_mat, na.rm = TRUE)
-# )
-# 
-# ggplot(overall_consistency, aes(factor(fold), match_rate)) +
-#   geom_col() + labs(x = "Subset fold", y = "Agreement with full-set projection",
-#                     title = "Projection label consistency across 6 training subsets") +
-#   ylim(0, 1)
-# 
-# ggplot(per_cluster_df, aes(cluster, consistency)) +
-#   geom_col() + coord_flip() +
-#   labs(x = "Projected cluster (full-set RF call)",
-#        y = "Mean agreement across folds",
-#        title = "Per-cluster projection consistency") +
-#   ylim(0, 1)
-# 
-# xy_combined$final_cluster <- ifelse(
-#   is.na(xy_combined$seurat_clusters),
-#   as.character(xy_combined$rf_cluster),
-#   as.character(xy_combined$seurat_clusters)
-# )
-# 
-# # make it a factor with consistent levels
-# xy_combined$final_cluster <- factor(xy_combined$final_cluster)
-# obj = JoinLayers(xy_combined)
-
-
-```
-
-```{r}
-# 
-# # Find markers for your clusters
-# markers <- FindAllMarkers(obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
-# 
-# # markers has: cluster, gene, avg_log2FC, p_val_adj, etc.
-# 
-# # Load their marker table (saved from Supplementary)
-# paper_markers <- readxl::read_xlsx("~/Downloads/41593_2020_586_MOESM2_ESM.xlsx", skip = 3, sheet = 1) %>% select(1:7)
-# # For each cluster, see which paper-defined markers are enriched
-# clusters <- levels(obj$final_cluster)
-# best_paper_clusters = c()
-# for (cl in clusters) {
-#   my_markers <- markers %>% filter(cluster == cl) %>% pull(gene)
-#   overlap <- paper_markers %>% filter(`gene...7` %in% my_markers)
-#   best_paper_clusters = c(best_paper_clusters, names(sort(table(overlap$cluster...6), decreasing = T)[1]))
-# }
-# best_match <- data.frame(seurat_cluster = clusters, best_paper_clusters = best_paper_clusters)
-# 
-# 
-# 
-# # Add cell type labels to metadata
-# xy_combined$seurat_clusters <- plyr::mapvalues(
-#   x = as.character(xy_combined$final_cluster),
-#   from = best_match$seurat_cluster,
-#   to = best_match$best_paper_clusters
-# )
-# 
-# # Add cell type labels to metadata
-# training$celltype <- plyr::mapvalues(
-#   x = as.character(training$seurat_clusters),
-#   from = best_match$seurat_cluster,
-#   to = best_match$best_paper_clusters
-# )
-# 
-# #  make factor with nice ordering
-# xy_combined$seurat_clusters <- factor(xy_combined$seurat_clusters)
-# training$celltype <- factor(training$celltype)
-# 
-# 
-# # ---- Save useful outputs ----
-# # training (clustered), projection with RF labels, combined t-SNE
-# 
-# saveRDS(xy_combined,  file = "~/Desktop/SCN_mouse_custom_clustering.rds")
-```
-
-Compare this clustering to Fig 1e in paper (training cells only).
-
-```{r}
-# Suppose your metadata has 'celltype' (Astrocytes, Neurons, etc.)
-Idents(seurat_obj) <- "cluster"
-
-# Choose marker genes (make sure they match your gene symbols!)
-markers <- c("Agt", "Itm2a", "Tmem212", "Hexb", "Celf4",
-             "Pdgfra", "Top2a", "Plp1", "Opalin",
-             "Plin3", "Tnr", "Col23a1")
-
-# Violin plots for each marker across cell types
-VlnPlot(seurat_obj, features = markers, group.by = "cluster",
-        pt.size = 0, stack = TRUE, flip = F, combine = TRUE)
-
-table(seurat_obj$timepoint, seurat_obj$seurat_clusters)
-
 ```
 
 ```{r}
@@ -501,9 +281,9 @@ var_cycling_custom <- function(times, var_mat, mean_mat, phase_pb,meta_data, tim
 ```{r}
 neuron_sub_obj = joined_seurat_obj
 neuron_sub_obj$seurat_clusters = neuron_sub_obj$neuron_subcluster
-obj = neuron_sub_obj#seurat_obj_coarse
+obj = neuron_sub_obj#seurat_obj_coarse#
 cluster_phis = list()
-for(cell_type in c("avp/nms","vip/grp","cck/c1ql3", "vip/nms","cck/bdnf")){
+for(cell_type in names(table(obj$seurat_clusters))){
   
 print(paste("Analyzing", cell_type))
 
@@ -532,15 +312,15 @@ print(ZT)
 # ZT = as.numeric(colnames(pb_mat))
 
 #Call cosinor regression methods, where phases of variance wave are NOT fixed:
-# pb_cycling = is_cycling(ZT, pb_mat, time_units = "hrs")
-pb_cycling = is_cycling_custom(ZT, pb_mat, meta_data = obj@meta.data, time_units = "hrs")
+pb_cycling = is_cycling(ZT, pb_mat, time_units = "hrs")
+# pb_cycling = is_cycling_custom(ZT, pb_mat, meta_data = obj@meta.data, time_units = "hrs")
 
 phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
 
 var_mat = var_mat[phase_pb$Gene_Symbols,]
 pb_mat = pb_mat[phase_pb$Gene_Symbols,]
 
-all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
+stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
 phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
 #hist(as.numeric(phase_pb))
 
@@ -571,7 +351,7 @@ if(all(is.na(phi))){
  next
 }
 
-# plot_rhythms(ZT, var_mat, pb_mat, plot_me = c("Pam"))
+plot_rhythms(ZT, var_mat, pb_mat, plot_me = c("Akap17b"))
 
 output_cos_tmm = merge(phi, input_cos, by = 0)
 # output = merge(output_cos_tmm, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
@@ -598,11 +378,13 @@ cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_n
 cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
 table(cos_phis_tmm_filt$Source)
 
+save(cos_phis_tmm, file = "mouse_SCN_neuronSubtype_phis.RData")
 ```
 
 Box plots
 
 ```{r}
+library(ggplot2)
 plot_df = filter(cos_phis_tmm_filt, Source %in% c("cck/bdnf", "vip/nms"))
 
 custom_colors <- c("avp/nms" = "#F8766D", "cck/bdnf" = "#E68613", "cck/c1ql3" = "#ABA300", "vip/grp" = "#0CB702", "vip/nms" = "#00BFC4")
@@ -666,23 +448,199 @@ vip_cck_bulkAmp_boxplot = ggplot(plot_df, aes(x = Source,y =  log(amplitude_bulk
 
 ggsave("~/Desktop/vip_cck_bulkAmp_boxplot.pdf", vip_cck_bulkAmp_boxplot, device = "pdf", width = 6, height = 5)
 
-mouse_SCN_acrodiff_compare = ggplot(plot_df, aes(x = acrodiff*12/pi)) +
-  geom_histogram(binwidth = 2, color = "black", fill = "steelblue") +
+mouse_SCN_acrodiff_compare = ggplot(plot_df, aes(x = acrodiff*12/pi, fill = Source)) +
+  geom_histogram(binwidth = 2, color = "black", alpha = 1) +
   facet_wrap(~ as.factor(Source), scales = "free_y") +
+  scale_fill_manual(values = custom_colors) +
+  guides(fill = "none") +    # remove fill legend
   xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
   ylab("Count")+
-   theme_minimal()+
+  theme_bw()+
   theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
     axis.text.x = element_text(size = 14),    # Increase x-axis text size
     axis.text.y = element_text(size = 14),    # Increase y-axis text size
     axis.title.x = element_text(size = 16),   # Increase x-axis title size
     axis.title.y = element_text(size = 16),   # Increase y-axis title size
     legend.title = element_text(size = 12)    # Increase legend title size
   )+
-  xlim(c(0, 12))
+   # Use scale_x_continuous for precise control over the x-axis
+  scale_x_continuous(
+    limits = c(0, 12), 
+    breaks = seq(0, 12, by = 3), 
+    expand = c(0, 0)
+  )
+
 ggsave("~/Desktop/mouse_SCN_acrodiff_compare.pdf", plot = mouse_SCN_acrodiff_compare, device = "pdf", width = 7, height = 5)
 
 
+```
+
+### Add Takahashi data on mouse SCN phase spread:
+
+```{r}
+library(ggplot2)
+library(ggrepel) # For non-overlapping text labels
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+
+# List of core clock genes
+clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2", "HLF", "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
+
+# Combine into a single, long-format data frame
+orpheus_df <- plot_df
+orpheus_df$cell_type <- case_when(
+    orpheus_df$Source == "cck/bdnf" ~ "SCN Cck+/Bdnf+\nneurons",
+    orpheus_df$Source == "vip/nms" ~ "SCN Vip+/Nms+\nneurons",
+    TRUE ~ NA
+  )
+
+# Add a column for labeling ONLY the clock genes
+orpheus_df$gene_label <- ifelse(toupper(orpheus_df$Row.names) %in% clock_genes, orpheus_df$Row.names, NA)
+orpheus_df$phi_hrs = orpheus_df$phi *12 / pi
+
+#Published Data
+published_phis <- c(1.3235566 ,3.4047716, 0.5998745)
+published_summary <- data.frame(
+  # Use a clear name for the x-axis category
+  cell_type = factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
+  mean_phi = mean(published_phis),
+  sd_phi = sd(published_phis)
+)
+published_points <- data.frame(
+  cell_type =  factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
+  phi = c(1.3235566 ,3.4047716, 0.5998745)
+)
+
+
+# Set the order of the categories on the x-axis
+category_order <- c("SCN Cck+/Bdnf+\nneurons", "SCN Vip+/Nms+\nneurons", "Published PER2::luc Assay\n(Shan et al. 2020)")
+orpheus_df$cell_type <- factor(orpheus_df$cell_type, levels = category_order)
+published_summary$cell_type <- factor(published_summary$cell_type, levels = category_order)
+
+
+# The Plot
+p <- ggplot() +
+  
+  # # Shaded region for the published data range for easy comparison
+  # geom_rect(
+  #   data = published_summary,
+  #   aes(xmin = -Inf, xmax = Inf, 
+  #       ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
+  #   fill = "grey90", alpha = 0.5
+  # ) +
+ # Shaded region for the published data range for easy comparison
+ geom_rect(
+   data = published_points,
+   aes(xmin = -Inf, xmax = Inf,
+       ymin = min(phi), ymax = max(phi)),
+   fill = "grey90", alpha = 0.5
+ ) +
+  # Boxplots for the ORPHEUS data
+  geom_boxplot(
+    data = orpheus_df,
+    aes(x = cell_type, y = phi_hrs, fill = cell_type),
+    width = 0.5,
+    outlier.shape = NA # We will plot the points ourselves
+  ) +
+  # Violin for the ORPHEUS data
+  # geom_violin(
+  #   data = orpheus_df,
+  #   aes(x = cell_type, y = phi_hrs, fill = cell_type)
+  # ) +
+  
+
+  # Individual gene points (jittered) for ORPHEUS data
+  geom_jitter(
+    data = orpheus_df, 
+    aes(x = cell_type, y = phi_hrs), 
+    alpha = 0.7,
+    position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  
+  # # The published data point estimate with error bars
+  # geom_pointrange(
+  #   data = published_summary,
+  #   aes(x = cell_type, y = mean_phi, ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
+  #   size = 1, 
+  #   fatten = 3, # Makes the point larger
+  #   color = "black",
+  #   shape = 18 # A diamond shape to distinguish it
+  # ) +
+    # The published data point estimates
+  geom_point(
+    data = published_points,
+    aes(x = cell_type, y = phi),
+    alpha = 0.7,
+    color = "black",
+  ) +
+  
+  # The Gene Labels (using ggrepel)
+  geom_text_repel(
+    data = orpheus_df,
+    aes(x = cell_type, y = phi_hrs, label = gene_label),
+    position = position_jitter(width = jitter_width, seed = jitter_seed),
+    box.padding = 0.5,         # More space around labels
+    point.padding = 0.5,       # Space from the point
+    min.segment.length = 0,    # Draw lines even for close labels
+    max.overlaps = Inf,        # Ensure all labels are shown
+    fontface = "italic",       # Italicize gene names
+    size = 4,
+  ) +
+  
+  # Aesthetics and Labels
+  scale_fill_manual(values = c("SCN Vip+/Nms+\nneurons" = "#018571", "SCN Cck+/Bdnf+\nneurons" = "#dfc27d")) +
+  labs(
+    title = "ORPHEUS Quantifies Cell-Type-Specific Synchrony in the SCN",
+    subtitle = "Phase dispersion estimates are consistent with experimental data from PER2::luc assays",
+    x = "", # No x-axis label needed
+    y = "Phase dispersion (hrs)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )
+
+# Display the plot
+print(p)
+ggsave("~/Desktop/mouse_vipCck_phi_w_takahashi_estimate.pdf",p, device = "pdf", width = 8, heigh = 6)
+
+
+#Updated histogram
+mouse_SCN_acrodiff_compare2 = ggplot(orpheus_df, aes(x = acrodiff*12/pi, fill = cell_type)) +
+  geom_histogram(binwidth = 2, color = "black", alpha = 1) +
+  facet_wrap(~ as.factor(cell_type), scales = "free_y") +
+  scale_fill_manual(values = c("SCN Vip+/Nms+\nneurons" = "#018571", "SCN Cck+/Bdnf+\nneurons" = "#dfc27d")) +
+  guides(fill = "none") +    # remove fill legend
+  xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
+  ylab("Count")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+
+   # Use scale_x_continuous for precise control over the x-axis
+  scale_x_continuous(
+    limits = c(0, 12), 
+    breaks = seq(0, 12, by = 3), 
+    expand = c(0, 0)
+  )
+
+ggsave("~/Desktop/mouse_SCN_acrodiff_compare_fixedAxisLabel.pdf", plot = mouse_SCN_acrodiff_compare2, device = "pdf", width = 7, height = 5)
 ```
 
 Repeat on "coarse clustering"
@@ -690,12 +648,86 @@ Repeat on "coarse clustering"
 ```{r}
 seurat_obj_coarse = joined_seurat_obj
 
+# seurat_obj_coarse$seurat_clusters <- case_when(
+#   joined_seurat_obj$seurat_clusters %in% paste0("Neurons", 1:6) ~ "Neurons",
+#   joined_seurat_obj$seurat_clusters %in% paste0("Oligodendrocytes", 1:3) ~ "Oligodendrocytes",
+#   joined_seurat_obj$seurat_clusters %in% paste0("NG2_cells", 1:2) ~ "NG2 cells",
+#   TRUE ~ as.character(joined_seurat_obj$seurat_clusters) # keep everything else as-is
+# )
+
+# seurat_obj_coarse$seurat_clusters <- case_when(
+#   joined_seurat_obj$neuron_subcluster %in% c("vip/grp","vip/nms")~"core",
+#   joined_seurat_obj$neuron_subcluster %in% c("cck/c1ql3" , "cck/bdnf", "avp/nms") ~ "shell",
+#   TRUE ~ NA # keep everything else as-is
+# )
+
 seurat_obj_coarse$seurat_clusters <- case_when(
-  joined_seurat_obj$seurat_clusters %in% paste0("Neurons", 1:6) ~ "Neurons",
-  joined_seurat_obj$seurat_clusters %in% paste0("Oligodendrocytes", 1:3) ~ "Oligodendrocytes",
-  joined_seurat_obj$seurat_clusters %in% paste0("NG2_cells", 1:2) ~ "NG2 cells",
-  TRUE ~ as.character(joined_seurat_obj$seurat_clusters) # keep everything else as-is
+  !is.na(joined_seurat_obj$neuron_subcluster) ~ "SCN",
+  TRUE ~ NA # keep everything else as-is
 )
+```
+
+Do Orpheus on all SCN cells as one cell type:
+
+```{r}
+obj = seurat_obj_coarse
+cell_type = "SCN"
+print(paste("Analyzing", cell_type))
+
+tmp = extract_clstr_prep_input(obj, cluster_id = cell_type, normalize = T)
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
+
+#Recover time in hours that sample was collected
+
+matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
+ZT = as.numeric(matches[,2])
+print(ZT)
+
+#Call cosinor regression methods, where phases of variance wave are NOT fixed:
+pb_cycling = is_cycling(ZT, pb_mat, time_units = "hrs")
+phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
+
+var_mat = var_mat[phase_pb$Gene_Symbols,]
+pb_mat = pb_mat[phase_pb$Gene_Symbols,]
+
+stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
+phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
+
+var_cyclers = var_cycling(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
+
+bulk_amp_thr = 0.1
+
+input_cos = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= bulk_amp_thr) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+phi <- tryCatch(
+  {
+    calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = bulk_amp_thr)
+  },
+  error = function(e) {
+    message("calc_phi failed: ", e$message)
+    return(NA)   # or NULL, or some safe default
+  }
+)
+
+
+output_cos_tmm = merge(phi, input_cos, by = 0)
+
+output = merge(output_cos_tmm, agg_theta_meas, by.x = "Row.names", by.y = 0)
+output$Source = "SCN"
 ```
 
 ```{r}
