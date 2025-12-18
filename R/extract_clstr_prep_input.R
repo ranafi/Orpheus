@@ -9,7 +9,7 @@
 #' @param seurat_obj A Seurat object with raw counts in the specified assay.
 #' @param assay The assay containing raw counts (default is "RNA").
 #' @param new_assay_name The name for the new assay that will store the normalized counts (default is "ORPHEUS_norm").
-#' @param min_prop The minimum proportion of cells expressing a gene to retain it, passed to edgeR::filterByExpr() (default is 0.01).
+#' @param min_prop The minimum proportion of cells expressing a gene to retain it, passed to sparse_filter_by_expr() (default is 0.01).
 #' @param min_count The minimum count threshold for a gene to be considered expressed in a cell (default is 1).
 #' @param verbose Logical indicating whether to print progress messages (default is TRUE).
 #' @return A Seurat object with a new assay containing globally filtered and normalized counts.
@@ -26,7 +26,7 @@ prepare_seurat_for_orpheus <- function(seurat_obj, assay = "RNA", new_assay_name
     # Global Gene Filtering
     if (verbose) message("Filtering genes based on expression across cells (min.prop = ", min_prop, ")...")
     
-    counts <- GetAssayData(seurat_obj, assay = assay, slot = "counts")
+    counts <- GetAssayData(seurat_obj, assay = assay, layer = "counts")
     
     keep <- sparse_filter_by_expr(counts, min_prop = min_prop, min_count = min_count)
     
@@ -40,7 +40,7 @@ prepare_seurat_for_orpheus <- function(seurat_obj, assay = "RNA", new_assay_name
     if (verbose) message("Performing global TMM normalization across ALL cells...")
     
     # Get the filtered counts
-    counts <- GetAssayData(seurat_obj, assay = assay, slot = "counts")
+    counts <- GetAssayData(seurat_obj, assay = assay, layer = "counts")
     
     y <- DGEList(counts = counts)
     y <- calcNormFactors(y, method = "TMM")
@@ -107,7 +107,7 @@ calculate_orpheus_inputs <- function(seurat_obj, groups_to_analyze, grouping_var
         cluster_cells <- seurat_obj[, cells_to_keep_vector]
         
         # Get the already-normalized counts for this subset
-        count_data_out <- GetAssayData(cluster_cells, assay = assay_to_use, slot = "counts")
+        count_data_out <- GetAssayData(cluster_cells, assay = assay_to_use, layer = "counts")
         
         meta <- cluster_cells@meta.data
         cell_counts <- table(meta$orig.ident)
@@ -115,7 +115,7 @@ calculate_orpheus_inputs <- function(seurat_obj, groups_to_analyze, grouping_var
         
         if (is_empty(individuals_to_keep)) {
             warning(paste("For group '", group_id, "', no individuals found with at least ", cells_threshold, " cells. Skipping."))
-            results_list[[group_id]] <- NULL # Explicitly mark as skipped
+            results_list[[as.character(group_id)]] <- NULL 
             next
         }
         
@@ -157,7 +157,7 @@ calculate_orpheus_inputs <- function(seurat_obj, groups_to_analyze, grouping_var
         
         if (is_empty(pseudobulk_list)) {
             warning(paste("No pseudobulks generated for group '", group_id, "'"))
-            results_list[[group_id]] <- NULL
+            results_list[[as.character(group_id)]] <- NULL
             next
         }
         
@@ -166,7 +166,7 @@ calculate_orpheus_inputs <- function(seurat_obj, groups_to_analyze, grouping_var
         var_df <- as.data.frame(do.call(cbind, variance_list))
 
         # Store results for this group
-        results_list[[group_id]] <- list(
+        results_list[[as.character(group_id)]] <- list(
             pseudobulk_tmm_matrix = pseudobulk_tmm_matrix, 
             var_df = var_df, 
             counts = count_data_out
@@ -189,6 +189,7 @@ calculate_orpheus_inputs <- function(seurat_obj, groups_to_analyze, grouping_var
 #'
 #' @importFrom Matrix rowSums
 #'
+#' @export
 sparse_filter_by_expr <- function(counts, min_prop = 0.01, min_count = 10) {
     # Calculate the minimum number of cells that must express the gene
     min_n_cells <- ceiling(min_prop * ncol(counts))

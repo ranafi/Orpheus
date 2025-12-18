@@ -223,7 +223,7 @@ var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") 
 #' @param phase_pb A numeric vector of pseudobulk acrophases (in radians) for each gene, typically obtained from `is_cycling()`.
 #' @param time_units A string indicating the time units ("hrs" for hours or "radians" for radians). Default is "hrs".
 #' @return A tibble summarizing double-frequency rhythmicity metrics for each gene, including acrophase, amplitude, p-values, and adjusted p-values.
-#' @noRd
+#' @export
 var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") {
   `%do%` <- foreach::`%do%`
   cat(paste("\nRunning var_cycling_fix_acro()"))
@@ -247,7 +247,7 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
     # Check for all zeros or zero variance
     if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
       # Return NA row for this gene
-      return(c(Gene_Symbols, rep(NA, 6))) # 9 columns to match the number of outputs
+      return(c(Gene_Symbols, rep(NA, 9))) # 9 columns to match the number of outputs
     }
 
 
@@ -265,7 +265,7 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
     #What is the amplitude of the fundamental according to V2?
     find_Af = lm(full_model$coefficients[["m1"]]*m1 ~ cos(times1-phase_bulk))
     fund_amp = find_Af$coefficients[["cos(times1 - phase_bulk)"]]
-
+    fund_mean_coeff = full_model$coefficients[["m1"]]
     anova_results = anova(partial_model, full_model)
     double_freq_p_statistic = anova_results$`Pr(>F)`[2]
     
@@ -280,7 +280,7 @@ var_cycling_fix_acro <- function(times, var_mat, mean_mat, phase_pb, time_units 
     gene_summary = cbind( Gene_Symbols, double_freq_amplitude, 
             double_freq_p_statistic, fund_amp, var_mesor,
             partial_model_AIC, full_model_AIC,
-            partial_model_BIC, full_model_BIC)
+            partial_model_BIC, full_model_BIC, fund_mean_coeff)
     
     
     
@@ -362,7 +362,7 @@ plot_rhythms <- function(times, var_mat, mean_mat, plot_me = c(), time_units = "
 
    # Data for plot 1 
     pb_data <- data.frame(times1_hrs = times1_hrs, m1 = m1) 
-    times_ideal <- seq(times1_hrs[1], times1_hrs[length(times1_hrs)], by = 0.1) 
+    times_ideal <- seq(0, round(max(times1_hrs)), by = 0.1) 
     pb_ideal_data <- data.frame(times_ideal = times_ideal, 
                             pb_ideal = pb_amp * cos((times_ideal - pb_acro_hrs)*(pi/12)) + pb_intercept) 
 
@@ -440,6 +440,7 @@ run_meta2d <- function(df,
                       out_dir,
                       minper = 24,
                       maxper = 24,
+                      cycMethod = c("JTK", "LS"),
                       ...){
   cat("\nIdentifying rhythms using MetaCycle\n")
 
@@ -452,7 +453,7 @@ run_meta2d <- function(df,
                     outdir=out_dir,
                     timepoints=timepoints,
                     minper = minper, maxper = maxper,
-                    cycMethod = c("JTK", "LS"),
+                    cycMethod = cycMethod,
                     ...)
 }
 
@@ -536,16 +537,14 @@ cycling_meta2d <- function(times, var_mat, mean_mat,
   meta2d_results_circ_file <- file.path(out_dir, paste0("meta2d_", tools::file_path_sans_ext(out_file_circ), ".txt"))
   if (file.exists(meta2d_results_circ_file)) {
     circ_results_raw <- read.table(meta2d_results_circ_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
-    expected_cols <- c("CycID", "JTK_adjphase", "JTK_amplitude", "LS_adjphase", "meta2d_phase", "meta2d_AMP", "meta2d_period", "meta2d_pvalue", "meta2d_BH.Q")
+    expected_cols <- c("CycID", "JTK_adjphase", "JTK_amplitude", "JTK_period", "JTK_pvalue", "JTK_BH.Q")
     missing_cols <- setdiff(expected_cols, colnames(circ_results_raw))
     if (length(missing_cols) > 0) {
-      stop("Check that data is suitable for JTK and LS, meta2d results file for circ is missing expected columns: ", paste(missing_cols, collapse = ", "))
+      stop("Check that data is suitable for JTK, meta2d results file for circ is missing expected columns: ", paste(missing_cols, collapse = ", "))
     }
     circ_results <- circ_results_raw %>%
       select(all_of(expected_cols))
     colnames(circ_results) <- c("Gene_Symbols",
-                                "JTK_double_freq_acrophase", "JTK_double_freq_amplitude",
-                                "LS_double_freq_acrophase",
                                 "double_freq_acrophase", "double_freq_amplitude",
                                 "double_freq_period", "double_freq_p_statistic", "double_freq_BH.Q")
     circ_results$var_mesor <- var_mesor_values  # Add var_mesor column
@@ -557,16 +556,14 @@ cycling_meta2d <- function(times, var_mat, mean_mat,
   meta2d_results_mean_file <- file.path(out_dir, paste0("meta2d_", tools::file_path_sans_ext(out_file_mean), ".txt"))
   if (file.exists(meta2d_results_mean_file)) {
     mean_results_raw <- read.table(meta2d_results_mean_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
-    expected_cols <- c("CycID", "JTK_adjphase", "JTK_amplitude", "LS_adjphase", "meta2d_phase", "meta2d_AMP", "meta2d_period", "meta2d_pvalue", "meta2d_BH.Q")
+    expected_cols <- c("CycID", "JTK_adjphase", "JTK_amplitude", "JTK_period", "JTK_pvalue", "JTK_BH.Q")
     missing_cols <- setdiff(expected_cols, colnames(mean_results_raw))
     if (length(missing_cols) > 0) {
-      stop("Check that data is suitable for JTK and LS, meta2d results file for mean rhythm is missing expected columns: ", paste(missing_cols, collapse = ", "))
+      stop("Check that data is suitable for JTK, meta2d results file for mean rhythm is missing expected columns: ", paste(missing_cols, collapse = ", "))
     }
     mean_results <- mean_results_raw %>%
       select(all_of(expected_cols))
     colnames(mean_results) <- c("Gene_Symbols",
-                                "JTK_fund_acrophase", "JTK_fund_amplitude",
-                                "LS_fund_acrophase",
                                 "fund_acrophase", "fund_amplitude",
                                 "fund_period", "fund_p_statistic", "fund_BH.Q")
   } else {
@@ -577,16 +574,14 @@ cycling_meta2d <- function(times, var_mat, mean_mat,
   meta2d_results_pb_file <- file.path(out_dir, paste0("meta2d_", tools::file_path_sans_ext(out_file_pb), ".txt"))
   if (file.exists(meta2d_results_pb_file)) {
     pb_results_raw <- read.table(meta2d_results_pb_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
-    expected_cols <- c("CycID", "JTK_adjphase", "JTK_amplitude", "LS_adjphase", "meta2d_phase", "meta2d_AMP", "meta2d_period", "meta2d_pvalue", "meta2d_BH.Q")
+    expected_cols <- c("CycID", "JTK_adjphase", "JTK_amplitude", "JTK_period", "JTK_pvalue", "JTK_BH.Q")
     missing_cols <- setdiff(expected_cols, colnames(pb_results_raw))
     if (length(missing_cols) > 0) {
-      stop("Check that data is suitable for JTK and LS, meta2d results file for pseudobulk rhythm is missing expected columns: ", paste(missing_cols, collapse = ", "))
+      stop("Check that data is suitable for JTK, meta2d results file for pseudobulk rhythm is missing expected columns: ", paste(missing_cols, collapse = ", "))
     }
     pb_results <- pb_results_raw %>%
       select(all_of(expected_cols))
     colnames(pb_results) <- c("Gene_Symbols",
-                            "JTK_acrophase_bulk", "JTK_amplitude_bulk",
-                            "LS_acrophase_bulk", 
                             "acrophase_bulk", "amplitude_bulk",
                             "period_bulk", "p_statistic", "BH.Q_bulk")
   } else {

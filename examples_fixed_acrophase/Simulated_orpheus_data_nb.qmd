@@ -1,0 +1,569 @@
+---
+title: "Simulated_orpheus_data_nb"
+format: html
+editor: visual
+---
+
+### Load libs
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(Orpheus)
+```
+
+### Define simulation function
+
+```{r}
+simulate_scRNAseq_circadian <- function(n = 10000, m = 5000, p_circ = 0.3,n_time_points = 6, 
+                                        phi_sd = 0.3, amp_ratio_range = c(.3, 0.75), G_range = c(0.05, 5), epsilon_sd = 0.,
+                                        theta_range = c(0.01,2.5)) { 
+  set.seed(123)
+  
+  # Time points
+  time_points <- seq(0, 2*pi, length.out = n_time_points) # Discrete time points for sampling
+  cell_time_indices <- sort(sample(1:n_time_points, n, replace = TRUE))
+  t_vals <- time_points[cell_time_indices] # Actual time for each cell
+  
+  # Assign circadian vs non-circadian genes
+  n_circ <- round(p_circ * m)
+  stopifnot(n_circ <= m)
+  circadian_gene_indices <- 1:n_circ # Row indices for circadian genes
+  
+  # Initialize expression matrix
+  expr_matrix <- matrix(0, nrow = m, ncol = n)
+  gene_names <- paste0("Gene", 1:m)
+  rownames(expr_matrix) <- gene_names
+  colnames(expr_matrix) <- paste0("Cell", 1:n)
+  
+  # Initialize data frame to store gene parameters
+  gene_parameters <- data.frame(
+    gene_id = gene_names,
+    theta_true = 0,
+    A_true = 0, # Amplitude, will be 0 for non-circadian
+    G_true = 0, # Baseline expression
+    V_w_theoret = 0,
+    V_2w_theoret = 0,
+    V_DC_theoret = 0,
+    S_amp_theoret = 0,
+    is_circadian = FALSE,
+    stringsAsFactors = FALSE
+  )
+
+  rownames(gene_parameters) <- gene_names
+  
+  
+  # Simulate circadian genes
+  if (n_circ > 0) {
+    for (i in 1:n_circ) {
+      gene_idx <- circadian_gene_indices[i] # Actual row index in expr_matrix
+      
+      #Select amp ratio
+      Amp_ratio_val <- runif(1, amp_ratio_range[1], amp_ratio_range[2])
+      #Select MESOR
+      G_val <- runif(1, G_range[1], G_range[2])
+      A_val <- Amp_ratio_val * G_val
+      stopifnot(A_val <= G_val) # Ensure baseline is at least amplitude (should be)
+      theta <- runif(1, theta_range[1], theta_range[2])
+      
+      esp = exp(-phi_sd^2)
+      es2p = exp(-2*phi_sd^2)
+      esp_half = exp(-phi_sd^2/2)
+      V_omega = A_val * esp_half * (1 + 2*theta*G_val)
+      V_2omega = (A_val^2/2) * (esp - (1+theta)*es2p)
+      V_DC = G_val + theta*G_val^2 + (1+theta)*epsilon_sd^2 + (A_val^2/2)*(1 + theta - esp)
+      
+      
+      # Store parameters
+      gene_parameters[gene_idx, "A_true"] <- A_val
+      gene_parameters[gene_idx, "G_true"] <- G_val
+      gene_parameters[gene_idx, "theta_true"] <- theta
+      gene_parameters[gene_idx, "is_circadian"] <- TRUE
+      gene_parameters[gene_idx, "V_w_theoret"] <- V_omega
+      gene_parameters[gene_idx, "V_2w_theoret"] <- V_2omega
+      gene_parameters[gene_idx, "V_DC_theoret"] <- V_DC
+      gene_parameters[gene_idx, "S_amp_theoret"] <- A_val*exp(-phi_sd^2/2)
+      
+      
+      phases_w_noise <- t_vals + rnorm(n, 0, phi_sd) # Cell-specific phase noise
+      cell_specific_epsilon_noise <- rnorm(n, 0, epsilon_sd) # Cell-specific expression noise
+      # repeat_nums <- table(t_vals)
+      # cell_specific_epsilon_noise <- rep(rnorm(n_time_points, 0, epsilon_sd), times = repeat_nums)
+      
+      if (gene_idx %% 2) { # Odd genes peak at t=0 (cosine)
+        lambdas <- A_val * cos(phases_w_noise) + G_val + cell_specific_epsilon_noise
+      } else { # Even genes peak at t=pi (cosine shifted)
+        lambdas <- A_val * cos(phases_w_noise - pi) + G_val + cell_specific_epsilon_noise
+      }
+      
+      # Ensure lambdas are non-negative (rpois requires lambda >= 0)
+      non_negative_lambdas <- pmax(0, lambdas) 
+      
+     
+      # For NB, mu is the mean. Size controls dispersion.
+      # var = mu + mu^2/size. If size=1, var = mu + mu^2. For large mu, var ~ mu^2.
+      counts <- rnbinom(n, size = 1/theta, mu = non_negative_lambdas)
+
+      
+      expr_matrix[gene_idx, ] <- counts
+    }
+  }
+  
+  # Simulate non-circadian genes
+  non_circadian_gene_indices <- setdiff(1:m, circadian_gene_indices)
+  if (length(non_circadian_gene_indices) > 0) {
+    for (gene_idx in non_circadian_gene_indices) {
+      G_val <- runif(1, G_range[1], G_range[2])
+      theta <- runif(1, theta_range[1], theta_range[2])
+      
+      # Store parameters (A is already 0, is_circadian is already FALSE)
+      gene_parameters[gene_idx, "G_true"] <- G_val
+      gene_parameters[gene_idx, "theta_true"] <- theta
+      
+      
+      cell_specific_epsilon_noise <- rnorm(n, 0, epsilon_sd)
+      # repeat_nums <- table(t_vals)
+      # cell_specific_epsilon_noise <- rep(rnorm(n_time_points, 0, epsilon_sd), times = repeat_nums)
+      mus <- G_val + cell_specific_epsilon_noise
+      
+      non_negative_mus <- pmax(0, mus)
+      counts <- rnbinom(n, size = 1/theta, mu = non_negative_mus)
+
+      
+      expr_matrix[gene_idx, ] <- counts
+    }
+  }
+  
+  # Metadata for cells
+  cell_metadata <- data.frame(
+    cell_id = colnames(expr_matrix),
+    time_point = t_vals # The "true" sampled time for each cell
+  )
+  
+  # Identify which gene names are circadian (can be derived from gene_parameters too)
+  circadian_gene_names <- gene_parameters$gene_id[gene_parameters$is_circadian]
+  
+  return(list(
+    counts = expr_matrix, 
+    cell_metadata = cell_metadata, 
+    gene_parameters = gene_parameters,
+    circadian_gene_ids = circadian_gene_names # More informative than just indices
+  ))
+}
+
+```
+
+### Simulate realistic data (params from hepatocytes in liver data)
+
+```{r}
+output = list()
+for(i in seq(0, 4.5, by = 0.5)){
+  print(paste0("phi = ", i))
+  phi_sd = i/12*pi
+  epsilon_sd = 0.3
+  #These were numbers based on hepatocytes 2
+  # sim <- simulate_scRNAseq_circadian(n = 5000, m = 10000, p_circ = .25, phi_sd = phi_sd, n_time_points = 6,
+  #               amp_ratio_range = c(.2, 0.6), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1,2.0))
+  #These are numbers based on hepatocytes 1
+  sim <- simulate_scRNAseq_circadian(n = 8000, m = 10000, p_circ = .1, phi_sd = phi_sd, n_time_points = 6,
+                amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.05, 1.5))
+  
+  counts <- sim$counts
+  metadata <- sim$cell_metadata
+  gene_info <- sim$gene_parameters
+  
+  seurat_obj <- CreateSeuratObject(counts = counts, meta.data = metadata)
+  seurat_obj$orig.ident = seurat_obj$time_point
+  seurat_obj$seurat_clusters = "0"
+  
+  s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj)
+  orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = "0", grouping_var = "seurat_clusters")
+  
+  tmp = orpheus_inputs[[1]]
+  pb_mat = tmp[[1]]
+  var_mat = tmp[[2]]
+  counts = tmp[[3]]
+  
+  #Variance of NB is var = mean + mean^2*theta
+  #rearrange to solve for theta = (var-mean)/mean^2
+  vars = sparseMatrixStats::rowVars(counts)
+  means = sparseMatrixStats::rowMeans2(counts)
+  agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+  rownames(agg_theta_meas) = rownames(pb_mat)
+
+  # summary(agg_theta_meas$coarse_theta)
+  # 
+  # summary(means)
+  
+  ZT = as.numeric(colnames(pb_mat) )
+  
+  pb_cycling = is_cycling(ZT, pb_mat, time_units = "rad")
+  circ_genes = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
+  circ_genes_phases = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(acrophase_bulk)  %>% unname %>% unlist %>% as.numeric
+  
+  # length(circ_genes)
+  # pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(amp_ratio) %>% unname %>% unlist %>% as.numeric %>% summary
+  
+  var_cyclers = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
+  
+  phi = calc_phi( pb_cycling, var_cyclers, bulk_amp_thr = 0 )
+  
+  input = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix= c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+    # filter(keep_acrodiff == TRUE) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, everything()) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    # filter( amplitude_bulk >= 0.5) %>%
+    # select(c(1:5)) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+  
+  plot_df = merge(input, phi, by = 0) %>%
+    merge(., gene_info, by.x="Row.names", by.y = 0)%>%
+    mutate(phase_error = (phi -phi_sd ))
+  plot_df$phi_true = phi_sd
+  # out = merge(plot_df, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
+  out = merge(plot_df, agg_theta_meas, by.x = "Row.names", by.y = 0)
+  
+  output <- append(output, list(out))
+}
+
+
+#convert list into dataframe
+df = do.call(rbind, output)
+save(df, file = "~/Desktop/df_8kcells10kgenes_6times_epsilon03.RData")
+
+```
+
+Load data from above if already saved:
+
+```{r}
+load("./figures/simulations/df_8kcells10kgenes_6times_epsilon03.RData")
+
+```
+
+#### Plotting:
+
+```{r}
+#Keep rows of results where bulk amp > thresh & not NaN
+df_filt = dplyr::filter(df, !is.na(phi) & amplitude_bulk >= 0.5)
+
+#Plot: Phi sd pred acc vs true phi sd
+df_filt$phi_true_factor = as.factor(df_filt$phi_true*12/pi)
+
+phi_acc_plot = ggplot(df_filt, aes(x = phi_true*12/pi,y =  phi*12/pi))+
+  # geom_boxplot(aes(group = phi_true_factor), outlier.size = 0.5, outlier.alpha = 0.2)+
+  geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+
+  # geom_jitter(width = 0.1, alpha = 0.5) +
+  # geom_violin(aes(group = phi_true_factor)) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  # stat_summary(fun = median, geom = "point", size = 2.5, color = "skyblue")+
+  ggtitle("n=5000,m=10000,p_circ=.3,phi_sd=phi_sd,n_time_points=6,\namp_ratio_range=c(.3,0.75),G_range=c(.05,5),epsilon_sd=0.3,theta_range=c(0.01,2.5)")+
+  xlab("True phase std. (hrs)")+
+  ylab("Prediceted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 9))+
+  guides(fill = "none")    # remove fill legend
+
+ggsave("~/Desktop/Simulated_phi_acc.pdf", plot = phi_acc_plot, width = 5, height = 5, units = "in")  
+
+
+df_no_nan = filter(df, !is.nan(phi))
+
+bulk_amp_vs_phase_err = ggplot(df_no_nan, aes(x = amplitude_bulk, y = abs(phase_error*12/pi), z = phi_true*12/pi)) +
+  stat_summary_hex(bins = 30,
+                   fun = mean) + # Color bins by the MEAN true_phase_std inside them
+  scale_fill_distiller(palette = "Spectral", name = "Mean true phase\ndispersion (hrs)\nwithin bin") +
+  geom_smooth(method = "loess", color = "black", linetype = "dashed", se = FALSE) +
+  labs(
+    title = "High Estimation Error is Driven by Low Amplitude and High True Dispersion",
+    x = "Bulk amplitude (measured)",
+    y = "Abs. error of phase dispersion (hrs)"
+  ) +
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+    coord_fixed(ratio = .5)
+
+ggsave("~/Desktop/bulk_amp_vs_phase_err.pdf", plot = bulk_amp_vs_phase_err, width = 7,height = 7, units = "in")  
+
+
+bulk_amp_vs_phase_err2 = ggplot(df_no_nan, aes(x = amplitude_bulk, y = abs(phase_error*12/pi))) +
+  geom_hex(bins = 30 ) + 
+  scale_fill_viridis_c(name = "Gene\ncount") +
+  geom_smooth(method = "loess", color = "red", linetype = "dashed", se = FALSE) +
+  labs(
+    title = "High Estimation Error is Driven by Low Amplitude and High True Dispersion",
+    x = "Bulk amplitude (measured)",
+    y = "Abs. error of phase dispersion (hrs)"
+  ) +
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+    coord_fixed(ratio = .5)
+
+ggsave("~/Desktop/bulk_amp_vs_phase_err_count.pdf", plot = bulk_amp_vs_phase_err2, width = 5,height = 5, units = "in")  
+
+
+# custom_labels <- setNames(paste0("Phi SD. = ", unique(round(df_filt$phi_true*12/pi, 2)) ), unique(df_filt$phi_true))
+# plot_acrodiff = filter(df_filt, phi_true_factor %in% c(0,1,2,3,4))
+# 
+# acrodiff_compare = ggplot(plot_acrodiff, aes(x = acrodiff*12/pi, fill = phi_true*12/pi)) +
+#   geom_histogram(binwidth = 2, color = "black", breaks = seq(0, 12, by = 2)) +
+#   facet_wrap(~ as.factor(phi_true), scales = "free_y", labeller = as_labeller(custom_labels), nrow = 1) +
+#   scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+#   xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
+#   ylab("Count")+
+#   # ggtitle("n=5000,m=10000,p_circ=.2,n_time_points = 12,\nA_range=c(.1, 5),G_range = c(.1, 5),epsilon_sd = 2.0,\ntheta_range=c(0.1,1)")+
+#   theme_bw()+
+#     theme(
+#     strip.background = element_blank(),
+#     strip.text = element_text(color = "black", size = 12),
+#     axis.text.x = element_text(size = 14),    # Increase x-axis text size
+#     axis.text.y = element_text(size = 14),    # Increase y-axis text size
+#     axis.title.x = element_text(size = 16),   # Increase x-axis title size
+#     axis.title.y = element_text(size = 16),   # Increase y-axis title size
+#     legend.title = element_text(size = 12)    # Increase legend title size
+#   )+
+#    # Use scale_x_continuous for precise control over the x-axis
+#   scale_x_continuous(
+#     limits = c(0, 12), 
+#     breaks = seq(0, 12, by = 4), 
+#     expand = c(0, 0)
+#   )+guides(fill = "none")
+# ggsave("~/Desktop/acrodiff_compare.pdf", plot = acrodiff_compare, width = 10, height = 4, units = "in")  
+
+```
+
+#### Power Analysis:
+
+```{r}
+#Load in dataframe
+
+df_filt = dplyr::filter(df, !is.na(phi) & amplitude_bulk >= 0.5)
+
+ns = seq(5, 80, by = 5)
+phi_vals <- sort(unique(df_filt$phi_true))
+
+pair = c(phi_vals[6], phi_vals[8])
+
+A <- df_filt$phi[df_filt$phi_true == pair[1]]
+B <- df_filt$phi[df_filt$phi_true == pair[2]]
+
+n_boots <- 1000
+power <- numeric(length(ns))
+names(power) <- ns
+
+for (n in ns) {
+  pvals <- replicate(n_boots, {
+    sampA <- sample(A, n, replace = FALSE)
+    sampB <- sample(B, n, replace = FALSE)
+    wilcox.test(sampA, sampB)$p.value
+  })
+  
+  power[as.character(n)] <- mean(pvals < 0.05)
+}
+
+plot(names(power), power)
+
+```
+
+#### False positive rate:
+
+```{r}
+
+df_filt = dplyr::filter(df, !is.na(phi) & amplitude_bulk >= 0.5)
+
+ns = seq(5, 50, by = 5)
+phi_vals <- sort(unique(df_filt$phi_true))
+
+n_boots <- 1000
+
+
+results <- list()
+
+for (phi in phi_vals) {
+  A <- df_filt$phi[df_filt$phi_true == phi]
+  
+  for (n in ns) {
+    pvals <- replicate(n_boots, {
+      sampA  <- sample(A, n, replace = FALSE)
+      sampA2 <- sample(A, n, replace = FALSE)
+      wilcox.test(sampA, sampA2)$p.value
+    })
+    
+    fpr <- mean(pvals < 0.05)
+    
+    # store a row
+    results[[length(results) + 1]] <- data.frame(
+      phi_true = phi,
+      n = n,
+      fpr = fpr
+    )
+  }
+}
+
+df_fpr <- do.call(rbind, results)
+
+library(ggplot2)
+
+ggplot(df_fpr, aes(x = n, y = fpr, color = factor(phi_true*12/pi))) +
+  geom_line() +
+  geom_hline(yintercept = 0.05, linetype = "dashed") +
+  theme_bw() +
+  labs(color = "phi_true", y = "False positive rate")
+```
+
+### Idealized Scenario:
+
+```{r}
+output_ideal = list()
+for(i in seq(0, 4.5, by = 0.5)){
+  print(paste0("phi = ", i))
+  phi_sd = i/12*pi
+  epsilon_sd = 0.3
+  # sim <- simulate_scRNAseq_circadian(n = 24000, m = 10000, p_circ = .25, phi_sd = phi_sd, n_time_points = 12,
+  #               amp_ratio_range = c(.2, 0.6), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1,2.0))
+  sim <- simulate_scRNAseq_circadian(n = 24000, m = 10000, p_circ = .1, phi_sd = phi_sd, n_time_points = 12,
+                amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.05, 1.5))
+  
+  counts <- sim$counts
+  metadata <- sim$cell_metadata
+  gene_info <- sim$gene_parameters
+  
+  seurat_obj <- CreateSeuratObject(counts = counts, meta.data = metadata)
+  seurat_obj$orig.ident = seurat_obj$time_point
+  seurat_obj$seurat_clusters = "0"
+  
+  s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj)
+  orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = "0", grouping_var = "seurat_clusters")
+  
+  tmp = orpheus_inputs[[1]]
+  pb_mat = tmp[[1]]
+  var_mat = tmp[[2]]
+  counts = tmp[[3]]
+  
+  #Variance of NB is var = mean + mean^2*theta
+  #rearrange to solve for theta = (var-mean)/mean^2
+  vars = sparseMatrixStats::rowVars(counts)
+  means = sparseMatrixStats::rowMeans2(counts)
+  agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+  rownames(agg_theta_meas) = rownames(pb_mat)
+
+  # summary(agg_theta_meas$coarse_theta)
+  # 
+  # summary(means)
+  
+  ZT = as.numeric(colnames(pb_mat) )
+  
+  pb_cycling = is_cycling(ZT, pb_mat, time_units = "rad")
+  circ_genes = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
+  circ_genes_phases = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(acrophase_bulk)  %>% unname %>% unlist %>% as.numeric
+  
+  # length(circ_genes)
+  # pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(amp_ratio) %>% unname %>% unlist %>% as.numeric %>% summary
+  
+  var_cyclers = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
+  phi = calc_phi( pb_cycling, var_cyclers, bulk_amp_thr = 0 )
+  input = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix= c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+    # filter(keep_acrodiff == TRUE) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, everything()) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    # filter( amplitude_bulk >= 0.5) %>%
+    # select(c(1:5)) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+  
+  plot_df = merge(input, phi, by = 0) %>%
+    merge(., gene_info, by.x="Row.names", by.y = 0)%>%
+    mutate(phase_error = (phi -phi_sd ))
+  plot_df$phi_true = phi_sd
+  # out = merge(plot_df, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
+  out = merge(plot_df, agg_theta_meas, by.x = "Row.names", by.y = 0)
+  
+  output_ideal <- append(output_ideal, list(out))
+}
+
+
+#convert list into dataframe
+df_ideal = do.call(rbind, output_ideal)
+save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized.RData")
+
+```
+
+#### Plotting
+
+```{r}
+#Keep rows of results where bulk amp > thresh & not NaN
+df_filt_ideal = dplyr::filter(df_ideal, !is.na(phi) & amplitude_bulk >= 0.5)
+
+#Plot: Phi sd pred acc vs true phi sd
+df_filt_ideal$phi_true_factor = as.factor(df_filt_ideal$phi_true*12/pi)
+
+phi_acc_plot = ggplot(df_filt_ideal, aes(x = phi_true*12/pi,y =  phi*12/pi))+
+  # geom_boxplot(aes(group = phi_true_factor), outlier.size = 0.5, outlier.alpha = 0.2)+
+  geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+
+  # geom_jitter(width = 0.1, alpha = 0.5) +
+  # geom_violin(aes(group = phi_true_factor)) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  # stat_summary(fun = median, geom = "point", size = 2.5, color = "skyblue")+
+  ggtitle("n=5000,m=10000,p_circ=.3,phi_sd=phi_sd,n_time_points=6,\namp_ratio_range=c(.3,0.75),G_range=c(.05,5),epsilon_sd=0.3,theta_range=c(0.01,2.5)")+
+  theme_minimal()+
+  xlab("True phase std. (hrs)")+
+  ylab("Prediceted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 9))+
+  guides(fill = "none")    # remove fill legend
+
+ggsave("~/Desktop/Simulated_phi_acc_idealized.pdf", plot = phi_acc_plot, width = 5, height = 5, units = "in")  
+
+```

@@ -20,7 +20,7 @@ prepare_seurat_for_orpheus(
 
 \item{new_assay_name}{The name for the new assay that will store the normalized counts (default is "ORPHEUS_norm").}
 
-\item{min_prop}{The minimum proportion of cells expressing a gene to retain it, passed to edgeR::filterByExpr() (default is 0.01).}
+\item{min_prop}{The minimum proportion of cells expressing a gene to retain it, passed to sparse_filter_by_expr() (default is 0.01).}
 
 \item{min_count}{The minimum count threshold for a gene to be considered expressed in a cell (default is 1).}
 

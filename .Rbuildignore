@@ -6,3 +6,5 @@
 ^docs/
 _pkgdown.yml
 R/estimate_single_phi.R
+^examples_fixed_acrophase/
+^examples_old/

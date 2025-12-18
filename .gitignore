@@ -9,3 +9,14 @@ R/.DS_Store
 R/output/*
 R/input*
 examples_old/
+examples/AD_cells_inhibitory.qmd
+examples/test_ADcells_method2cyclingDetection.R
+R/.DS_Store
+R/mouse_liver_pb_var_counts_list.RData
+examples/
+examples_fixed_acrophase/*.RData
+examples_fixed_acrophase/*.h5Seurat
+examples_fixed_acrophase/figures/*
+examples_fixed_acrophase/*copy.qmd
+examples_fixed_acrophase/Testing_synchrony_mouse_SCN.qmd
+examples_fixed_acrophase/test_ADcells_method2cyclingDetection.R
