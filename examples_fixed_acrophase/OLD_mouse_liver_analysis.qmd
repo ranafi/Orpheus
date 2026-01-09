@@ -82,7 +82,9 @@ quantile(as.numeric(sig_cyclers$amp_ratio), probs = c(0.05, 0.95))
 Here we assign cells of each subject to one of two pseudoreplicates, we will do this 4 times and consider results found in all four folds.
 
 ```{r}
-s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA")
+# s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA")
+# saveRDS(s_obj, file = "../../Mouse_liver_data/liver_timecourse_seurat_object_ORPHEUS_norm.Rds")
+s_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object_ORPHEUS_norm.Rds")
 
 seeds <- c(1,2,3,4)
 #Initialize an empty list to store all results
@@ -1910,12 +1912,11 @@ library(tidyverse)
 library(ggpubr)
 library(circular)
 
-seurat_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object.Rds")
+seurat_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object_ORPHEUS_norm.Rds")
 
 s_obj = subset(seurat_obj, subset = all_cell_types %in% c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes"))
 
-#I will take raw counts from seurat, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva:
-s_obj = prepare_seurat_for_orpheus(seurat_obj = s_obj, assay = "RNA")
+#I will take raw counts from seurat, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva. Since they have already been normalized (ORPHEUS_norm assay), I just need to log them.
 
 s_obj$dummy = "1"
 #I will also make a pseudobulk for the 4 hepatocyte types, in which I will identify rhythms and remove those genes from GSVA:
@@ -1935,12 +1936,15 @@ load("figures/mouse_liver/pathway_analysis/hepatocytes_log_counts_for_gsva.RData
 ```{r}
 mouse_hallmark <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "MH")
 genesets_list <- split(mouse_hallmark$gene_symbol, mouse_hallmark$gs_name)
+
+# mouse_wiki <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2", subcollection = "CP:WIKIPATHWAYS")
+# genesets_list <- split(mouse_wiki$gene_symbol, mouse_wiki$gs_name)
 ```
 
 ```{r}
 # hep_pb = hep_pb_var$`1`$pseudobulk_tmm_matrix
 # times = str_extract(colnames(hep_pb), "[0-9]+") %>% as.numeric
-
+# 
 # hepa_cycling_results = is_cycling(times, pb_mat = hep_pb, time_units = "hrs")
 # write.table(hepa_cycling_results, "~/Desktop/hepatocytes_all_cycling_genes_pb.csv", sep = ",", row.names = F)
 
@@ -1958,7 +1962,7 @@ tmm_non_rhythmic = df_log_counts[hepa_non_cyclers$Gene_Symbols,]
 tmm_non_rhythmic_matrix = as.matrix(tmm_non_rhythmic)
 
 #Call GSVA, ranking CTL subjects by pathway score for all pathways
-gsva_res_mat = gsva(as.matrix(tmm_non_rhythmic), genesets_list, min.sz = 50)
+gsva_res_mat = gsva(tmm_non_rhythmic_matrix, genesets_list, min.sz = 50)
 
 # save(gsva_res_mat, file = "~/Desktop/mouse_liver_hepatocytes_gsva_cell_hallmark.RData")
 ##########################
@@ -1967,11 +1971,13 @@ load("figures/mouse_liver/pathway_analysis/mouse_liver_hepatocytes_gsva_cell_hal
 ###########################
 gsva_res = gsva_res_mat %>% as.data.frame
 
+##QUARTILES
 # pathway_groups <- t(apply(gsva_res, 1, function(scores) {
 #   qs <- quantile(scores, probs = c(0, .25, .5, .75, 1), na.rm = TRUE)
 #   cut(scores, breaks = qs, include.lowest = TRUE,
 #       labels = c("Q1_low", "Q2_midlow", "Q3_midhigh", "Q4_high"))
 # }))
+#TERTILES
 pathway_groups <- t(apply(gsva_res, 1, function(scores) {
     bins <- ntile(scores, 3)
   factor(
@@ -2041,7 +2047,10 @@ all(colnames(s_obj) == names(cell_strat))
 s_obj$strat <- cell_strat
 table(s_obj$strat, s_obj$orig.ident, useNA = "ifany")
 
+##TERTILES
 orpheus_input_i = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("T1_low", "T2_mid", "T3_high"), grouping_var = "strat", assay_to_use = "ORPHEUS_norm")
+##QUARTILES
+# orpheus_input_i = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("Q1_low", "Q2_midlow","Q3_midhigh", "Q4_high"), grouping_var = "strat", assay_to_use = "ORPHEUS_norm")
 
 orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
 input_i =  list("tmm" = orpheus_input_sans_counts)
@@ -2050,24 +2059,33 @@ pb_var_list <- append(pb_var_list, input_i)
 
 }
 
-save(pb_var_list, file ="figures/mouse_liver/pathway_analysis/hepatocytes_pb_var_matrices_list.RData")
-# load("../../figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list.RData")
+# save(pb_var_list, file ="figures/mouse_liver/pathway_analysis/hepatocytes_pb_var_matrices_list.RData")
+load("figures/mouse_liver/pathway_analysis/hepatocytes_pb_var_matrices_list.RData")
 
 ```
-
-Stopped here: with only 6 timespoints, stratifying subject by pathways into two groups means 3 timepoints per group, making finding 12hr rhythms hard.
 
 ```{r}
 #Now for each pathway, we look at the high, mid, and low groups:
 phi_outputs = list()
+stat_tests = list()
 for(pathway_name in names(pb_var_list)){
 
 orpheus_input_i = pb_var_list[[pathway_name]]
 #---------------BEGIN new technique: cycling together--------------------  
 # run cycling on the high, mid, and low groups together (concatenated pseudobulk, etc.) to find which genes I will test by my normal cutoffs, then do Orpheus for those genes without any cutoffs.
+##TERTILES
 pb_combined  <- cbind(orpheus_input_i$T1_low$pseudobulk_tmm_matrix, orpheus_input_i$T2_mid$pseudobulk_tmm_matrix, orpheus_input_i$T3_high$pseudobulk_tmm_matrix)
+var_combined <- cbind(orpheus_input_i$T1_low$var_df,
+                      orpheus_input_i$T2_mid$var_df,
+                      orpheus_input_i$T3_high$var_df)
 
-var_combined <- cbind(orpheus_input_i$T1_low$var_df, orpheus_input_i$T2_mid$var_df, orpheus_input_i$T3_high)
+##QUARTILES
+# pb_combined  <- cbind(orpheus_input_i$Q1_low$pseudobulk_tmm_matrix, orpheus_input_i$Q2_midlow$pseudobulk_tmm_matrix, orpheus_input_i$Q3_midhigh$pseudobulk_tmm_matrix,
+# orpheus_input_i$Q4_high$pseudobulk_tmm_matrix)
+# var_combined <- cbind(orpheus_input_i$Q1_low$var_df,
+#                       orpheus_input_i$Q2_midlow$var_df,
+#                       orpheus_input_i$Q3_midhigh$var_df,
+#                       orpheus_input_i$Q4_high$var_df)
 
 
 times_combined = colnames(pb_combined) %>% str_extract(., "[0-9]+$") %>% as.numeric
@@ -2111,28 +2129,25 @@ print(paste("Analyzing condition", cell_type))
 tmp = orpheus_input_i[[cell_type]]
 pb_mat = tmp[[1]]
 var_mat = tmp[[2]]
-# times = s_ctl$times[match(colnames(pb_mat), s_ctl$individualID)] %>% unname %>% unlist
-meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
-times = meta_data$times
-# stopifnot(all.equal(times, meta_data$times))
-stopifnot(all(meta_data$cond == 0)) #Are all subjects ctl?
+times = colnames(pb_mat) %>% str_extract(., "[0-9]+$") %>% as.numeric
+
 
 pb_mat_keep = pb_mat[keep_genes, ]
 var_mat_keep = var_mat[keep_genes, ]
 
 stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
 
-pb_cycling_custom = is_cycling_custom(times, pb_mat_keep, meta_data, time_units = "rads")
+pb_cycling_group = is_cycling(times, pb_mat_keep, time_units = "hrs")
 # write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
 
-stopifnot(all.equal(pb_cycling_custom$Gene_Symbols , rownames(var_mat_keep)))
-pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+stopifnot(all.equal(pb_cycling_group$Gene_Symbols , rownames(var_mat_keep)))
+pb_phases_group = as.numeric(pb_cycling_group$acrophase_bulk)
 
-var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+var_cyclers_group = var_cycling_fix_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_group, time_units = "hrs")
 
 
-input_cos_cust = var_cyclers_cust %>%
-    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+input_cos_group = var_cyclers_group %>%
+    left_join(pb_cycling_group, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
     mutate(across(-Gene_Symbols, as.numeric)) %>%
     # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
     # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
@@ -2144,7 +2159,7 @@ input_cos_cust = var_cyclers_cust %>%
     # filter(partial_model_AIC_var > full_model_AIC_var)
 
 # Calculate phi parameters
-phi_cust = input_cos_cust %>%
+phi_group = input_cos_group %>%
     apply(., 1, function(row) {
         suppressWarnings(
              Orpheus::find_analytic(row[1], row[2], row[3], row[4])
@@ -2152,11 +2167,11 @@ phi_cust = input_cos_cust %>%
     }) %>%
     t %>%
     as.data.frame
-colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+colnames(phi_group) = c("G", "Ac", "theta", "phi")
 
-output_cust = merge(phi_cust, input_cos_cust, by = 0)
+output_group = merge(phi_group, input_cos_group, by = 0)
 
-local_res =  list("tmm" = output_cust)
+local_res =  list("tmm" = output_group)
 names(local_res) = cell_type
 cluster_phis <- append(cluster_phis, list(local_res))
 }
@@ -2171,7 +2186,17 @@ phi_results_i <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_
 #----- plotting ------
 jitter_width <- 0.15
 jitter_seed <- 123 # A specific seed for reproducibility
-color_palette <- c("high" = "deepskyblue", "low" = "orange")
+color_palette <- c("T1_low" = "#66c5cc", "T2_mid" = "#F6CF71", "T3_high" = "#f89c74")
+# color_palette <- c("Q1_low" = "#66c5cc", "Q2_midlow" = "#F6CF71", "Q3_midhigh" = "#f89c74", "Q4_high" = "#7f58af" )
+
+k_test = kruskal.test(phi~Source, data = phi_results_i)
+pairwise_w_test = pairwise.wilcox.test(phi_results_i$phi, phi_results_i$Source, p.adjust.method = "BH")
+
+# my_comparisons <- list(
+#   c("T1_low", "T2_mid"),
+#   c("T1_low", "T3_high"),
+#   c("T2_mid", "T3_high")
+# )
 
 # Create the plot
 p <- ggplot(phi_results_i, aes(x = Source, y = phi*12/pi, fill = Source)) +
@@ -2185,13 +2210,12 @@ p <- ggplot(phi_results_i, aes(x = Source, y = phi*12/pi, fill = Source)) +
   scale_fill_manual(values = color_palette) +
   scale_color_manual(values = color_palette) +
   #Significance bar
-  stat_compare_means(
-    method = "wilcox.test",         # Specify the statistical test
-    comparisons = list(c("high", "low")), # A list of the pairs to compare
-    label = "p.signif",             # Display significance levels
-    label.y = 7, # Adjust vertical position of the bar
-    tip.length = 0.02 # Length of the small vertical lines
-  ) +
+  stat_compare_means(method = "kruskal.test") +
+  # stat_compare_means(
+  #   comparisons = my_comparisons,
+  #   method = "wilcox.test",
+  #   p.adjust.method = "BH"
+  # )+
   # Add labels and a title
   labs(
     title = pathway_name,
@@ -2210,19 +2234,71 @@ p <- ggplot(phi_results_i, aes(x = Source, y = phi*12/pi, fill = Source)) +
   )+
   ylim(c(0,8))
 #print(p)
-ggsave(paste0("~/Desktop/rosmap_exc35_pathways_ctl/exc35_phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
+ggsave(paste0("~/Desktop/mouse_liver_hepatocytes_pathways/phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
 
 phi_output_i =  list("tmm" = phi_results_i)
 names(phi_output_i) = pathway_name
 phi_outputs <- append(phi_outputs, phi_output_i)
 
+tests = list( list("kruskal" = k_test, "pairwise.wilcox" = pairwise_w_test))
+names(tests) = pathway_name
+stat_tests <- append(stat_tests, tests)
 }
 
 all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
 
 
-save(phi_outputs, file = "~/Desktop/rosmap_exc35_pathways_ctl/rosmap_exc35_ctl_pathway_phis.RData")
-save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_pathways_ctl/rosmap_exc35_ctl_pathway_phis_df.RData")
+save(phi_outputs, file = "~/Desktop/mouse_liver_hepatocytes_pathways/mouse_liver_hepatocytes_pathway_phis.RData")
+save(all_pathway_phis_df, file = "~/Desktop/mouse_liver_hepatocytes_pathways/mouse_liver_hepatocytes_pathway_phis_df.RData")
+
+kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
+kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
+save(kruskal.df, file = "~/Desktop/mouse_liver_hepatocytes_pathways/kruskal_df.RData")
+save(stat_tests, file = "~/Desktop/mouse_liver_hepatocytes_pathways_test.RData")
+```
+
+liver zonation vs pathway scores:
+
+```{r}
+all(colnames(pathway_groups) == colnames(s_obj))
+# score_bins = pathway_groups["HALLMARK_PEROXISOME",]
+score_bins = pathway_groups["HALLMARK_FATTY_ACID_METABOLISM",]
+subtypes = s_obj$all_cell_types
+table(score_bins, subtypes)
+
+
+
+df = data.frame(cell = subtypes, perox = unname(unlist(gsva_res["HALLMARK_PEROXISOME",])), FAM =unname(unlist(gsva_res["HALLMARK_FATTY_ACID_METABOLISM",] )))
+```
+
+#### Pathway analysis within subset of hepatocytes:
+
+```{r}
+
+library(GSVA)
+library(msigdbr)
+library(edgeR)
+library(SeuratDisk)
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(circular)
+
+seurat_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object.Rds")
+
+s_obj = subset(seurat_obj, subset = all_cell_types %in% "periportal hepatocytes")
+
+#I will take raw counts from seurat, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva:
+s_obj = prepare_seurat_for_orpheus(seurat_obj = s_obj, assay = "RNA")
+
+s_obj$dummy = "1"
+#I will also make a pseudobulk for the 4 hepatocyte types, in which I will identify rhythms and remove those genes from GSVA:
+hep_pb_var = calculate_orpheus_inputs(s_obj, groups_to_analyze = "1", grouping_var = "dummy")
+
+
+counts = s_obj@assays$ORPHEUS_norm$counts
+# Get log-transformed Counts
+log_counts = log1p(counts)
 ```
 
 ### Orpheus on just the 4 hepatocytes?

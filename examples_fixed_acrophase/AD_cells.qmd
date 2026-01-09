@@ -1703,12 +1703,12 @@ load("../../figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
 
 ```{r}
 
-# human_hallmark <- msigdbr(db_species = "HS", species = "Homo sapiens", collection = "H")
-# genesets_list <- split(human_hallmark$gene_symbol, human_hallmark$gs_name)
+human_hallmark <- msigdbr(db_species = "HS", species = "Homo sapiens", collection = "H")
+genesets_list <- split(human_hallmark$gene_symbol, human_hallmark$gs_name)
 
-human_kegg <- msigdbr(db_species = "HS", species = "Homo sapiens",
-                      collection = "C2", subcollection = "CP:KEGG_LEGACY")
-genesets_list <- split(human_kegg$gene_symbol, human_kegg$gs_name)
+# human_kegg <- msigdbr(db_species = "HS", species = "Homo sapiens",
+#                       collection = "C2", subcollection = "CP:KEGG_LEGACY")
+# genesets_list <- split(human_kegg$gene_symbol, human_kegg$gs_name)
 ```
 
 #### Read in cycling (in AD and CTL) results (genes with significance values).
@@ -1732,8 +1732,8 @@ CTL_non_cyclers = dplyr::filter(CTL_cycling_results, as.numeric(BHQ) >= 0.1 & as
 
 # SaveH5Seurat(s_obj, "../../figures/rosmap_exc35/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat", overwrite = FALSE, verbose = TRUE)
 
-file = c("../../figures/rosmap_exc35/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat")
-s_obj = LoadH5Seurat(file,assays = c("ORPHEUS_norm"), reductions = F, graphs = F, neighbors = F, images = F)
+file = "../../figures/rosmap_exc35/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat"
+s_obj = LoadH5Seurat(file, assays = c("ORPHEUS_norm"), reductions = F, graphs = F, neighbors = F, images = F)
 
 subject_meta <- s_obj@meta.data %>%
   group_by(individualID) %>%
@@ -1747,7 +1747,7 @@ subject_meta <- s_obj@meta.data %>%
 
 ```
 
-#### GSVA pathway analysis for CTL cells
+#### GSVA pathway analysis for CTL subjects
 
 ```{r}
 #convert logged PB counts to a df
@@ -1772,49 +1772,53 @@ pathway_w_meta_ctl = merge(pathway_groups_ctl, subject_meta, by.x = 0, by.y= "in
 s_ctl <- subset(s_obj, subset = cond_cogdx == 0)
 table(s_ctl$cond_cogdx)
 #---------------------------------------------------------------------------
-# #Loop through all the pathways and create pb and variance matrices for each,
-# #We will store these so I only have to do it once.
-# 
-# pb_var_list = list()
-# for(i in 1:ncol(pathway_groups_ctl)){
-# 
-# pathway_name = colnames(pathway_w_meta_ctl)[i]
-# message("Analyzing ", pathway_name)
-# 
-# subject_strat = pathway_w_meta_ctl[,i]
-# times_split = split(pathway_w_meta_ctl$times, subject_strat)
-# test <- list(high = circular(times_split$high,
-#                  units="radians"),
-#   low = circular(times_split$low,
-#                      units="radians")
-# )
-# ww_test_res = circular::watson.wheeler.test(test)
-# if(ww_test_res$p.value < 0.05){
-#    message(pathway_name , " ww_test < 0.05, skipping.")
-#    next # Skips the rest of the current iteration
-# }
-# 
-# # Add the new metadata to the Seurat object
-# stopifnot(!anyDuplicated(pathway_w_meta_ctl$Row.names))
-# s_ctl$strat <- pathway_w_meta_ctl[match(s_ctl$orig.ident, rownames(pathway_w_meta_ctl)), i]
-# table(s_ctl$strat, useNA = "ifany")
-# 
-# orpheus_input_i = calculate_orpheus_inputs(s_ctl, groups_to_analyze = c("high", "low"), grouping_var = "strat")
-# 
-# orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
-# input_i =  list("tmm" = orpheus_input_sans_counts)
-# names(input_i) = pathway_name
-# pb_var_list <- append(pb_var_list, input_i)
-# 
-# }
-# 
+#Loop through all the pathways and create pb and variance matrices for each,
+#We will store these so I only have to do it once.
+
+pb_var_list = list()
+for(i in 1:ncol(pathway_groups_ctl)){
+
+pathway_name = colnames(pathway_w_meta_ctl)[i]
+message("Analyzing ", pathway_name)
+
+subject_strat = pathway_w_meta_ctl[,i]
+times_split = split(pathway_w_meta_ctl$times, subject_strat)
+test <- list(high = circular(times_split$high,
+                 units="radians"),
+  low = circular(times_split$low,
+                     units="radians")
+)
+ww_test_res = circular::watson.wheeler.test(test)
+if(ww_test_res$p.value < 0.05){
+   message(pathway_name , " ww_test < 0.05, skipping.")
+   next # Skips the rest of the current iteration
+}
+
+# Add the new metadata to the Seurat object
+stopifnot(!anyDuplicated(pathway_w_meta_ctl$Row.names))
+s_ctl$strat <- pathway_w_meta_ctl[match(s_ctl$orig.ident, rownames(pathway_w_meta_ctl)), i]
+table(s_ctl$strat, useNA = "ifany")
+
+orpheus_input_i = calculate_orpheus_inputs(s_ctl, groups_to_analyze = c("high", "low"), grouping_var = "strat")
+
+orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+input_i =  list("tmm" = orpheus_input_sans_counts)
+names(input_i) = pathway_name
+pb_var_list <- append(pb_var_list, input_i)
+
+}
+
+# save(pb_var_list, file ="./figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list_HALLMARK.RData")
 # save(pb_var_list, file ="./figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list_KEGG.RData")
 # load("../../figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list.RData")
-load("./figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list_KEGG.RData")
+# load("./figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list_KEGG.RData")
+load("./figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list_HALLMARK.RData")
 load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
 #---------------------------------------------------------------------------
 #Now for each pathway, we look at the high and low groups:
 phi_outputs = list()
+stat_tests = list()
+
 for(pathway_name in names(pb_var_list)){
 
 orpheus_input_i = pb_var_list[[pathway_name]]
@@ -1972,9 +1976,15 @@ p <- ggplot(phi_results_i, aes(x = Source, y = phi*12/pi, fill = Source)) +
 #print(p)
 ggsave(paste0("~/Desktop/rosmap_exc35_pathways_ctl/exc35_phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
 
+
 phi_output_i =  list("tmm" = phi_results_i)
 names(phi_output_i) = pathway_name
 phi_outputs <- append(phi_outputs, phi_output_i)
+
+w_test = wilcox.test(phi~Source, data = phi_results_i)
+tests = list( list("wilcox" = w_test))
+names(tests) = pathway_name
+stat_tests <- append(stat_tests, tests)
 
 }
 
@@ -1983,6 +1993,11 @@ all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
 
 save(phi_outputs, file = "~/Desktop/rosmap_exc35_pathways_ctl/rosmap_exc35_ctl_pathway_phis.RData")
 save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_pathways_ctl/rosmap_exc35_ctl_pathway_phis_df.RData")
+
+
+wilcox_pvals <- sapply(stat_tests, function(x) x[["wilcox"]][["p.value"]])
+wilcox.df = data.frame("pval" = wilcox_pvals, "BHQ" = p.adjust(wilcox_pvals, method = "BH"))
+save(wilcox.df, file = "~/Desktop/rosmap_exc35_pathways_ctl/wilcox_df.RData")
 ```
 
 #### GSVA pathways for AD
