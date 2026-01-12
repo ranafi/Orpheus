@@ -1772,42 +1772,42 @@ pathway_w_meta_ctl = merge(pathway_groups_ctl, subject_meta, by.x = 0, by.y= "in
 s_ctl <- subset(s_obj, subset = cond_cogdx == 0)
 table(s_ctl$cond_cogdx)
 #---------------------------------------------------------------------------
-#Loop through all the pathways and create pb and variance matrices for each,
-#We will store these so I only have to do it once.
-
-pb_var_list = list()
-for(i in 1:ncol(pathway_groups_ctl)){
-
-pathway_name = colnames(pathway_w_meta_ctl)[i]
-message("Analyzing ", pathway_name)
-
-subject_strat = pathway_w_meta_ctl[,i]
-times_split = split(pathway_w_meta_ctl$times, subject_strat)
-test <- list(high = circular(times_split$high,
-                 units="radians"),
-  low = circular(times_split$low,
-                     units="radians")
-)
-ww_test_res = circular::watson.wheeler.test(test)
-if(ww_test_res$p.value < 0.05){
-   message(pathway_name , " ww_test < 0.05, skipping.")
-   next # Skips the rest of the current iteration
-}
-
-# Add the new metadata to the Seurat object
-stopifnot(!anyDuplicated(pathway_w_meta_ctl$Row.names))
-s_ctl$strat <- pathway_w_meta_ctl[match(s_ctl$orig.ident, rownames(pathway_w_meta_ctl)), i]
-table(s_ctl$strat, useNA = "ifany")
-
-orpheus_input_i = calculate_orpheus_inputs(s_ctl, groups_to_analyze = c("high", "low"), grouping_var = "strat")
-
-orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
-input_i =  list("tmm" = orpheus_input_sans_counts)
-names(input_i) = pathway_name
-pb_var_list <- append(pb_var_list, input_i)
-
-}
-
+# #Loop through all the pathways and create pb and variance matrices for each,
+# #We will store these so I only have to do it once.
+# 
+# pb_var_list = list()
+# for(i in 1:ncol(pathway_groups_ctl)){
+# 
+# pathway_name = colnames(pathway_w_meta_ctl)[i]
+# message("Analyzing ", pathway_name)
+# 
+# subject_strat = pathway_w_meta_ctl[,i]
+# times_split = split(pathway_w_meta_ctl$times, subject_strat)
+# test <- list(high = circular(times_split$high,
+#                  units="radians"),
+#   low = circular(times_split$low,
+#                      units="radians")
+# )
+# ww_test_res = circular::watson.wheeler.test(test)
+# if(ww_test_res$p.value < 0.05){
+#    message(pathway_name , " ww_test < 0.05, skipping.")
+#    next # Skips the rest of the current iteration
+# }
+# 
+# # Add the new metadata to the Seurat object
+# stopifnot(!anyDuplicated(pathway_w_meta_ctl$Row.names))
+# s_ctl$strat <- pathway_w_meta_ctl[match(s_ctl$orig.ident, rownames(pathway_w_meta_ctl)), i]
+# table(s_ctl$strat, useNA = "ifany")
+# 
+# orpheus_input_i = calculate_orpheus_inputs(s_ctl, groups_to_analyze = c("high", "low"), grouping_var = "strat")
+# 
+# orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+# input_i =  list("tmm" = orpheus_input_sans_counts)
+# names(input_i) = pathway_name
+# pb_var_list <- append(pb_var_list, input_i)
+# 
+# }
+# 
 # save(pb_var_list, file ="./figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list_HALLMARK.RData")
 # save(pb_var_list, file ="./figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list_KEGG.RData")
 # load("../../figures/rosmap_exc35/exc35_ctl_pb_var_matrices_list.RData")
@@ -2060,13 +2060,15 @@ table(s_ad$cond_cogdx)
 # pb_var_list <- append(pb_var_list, input_i)
 # 
 # }
-# 
+# save(pb_var_list, file ="figures/rosmap_exc35/exc35_ad_pb_var_matrices_list_HALLMARK.RData")
 # save(pb_var_list, file ="figures/rosmap_exc35/exc35_ad_pb_var_matrices_list_KEGG.RData")
-load("../../figures/rosmap_exc35/exc35_ad_pb_var_matrices_list.RData")
+load("./figures/rosmap_exc35/exc35_ad_pb_var_matrices_list_KEGG.RData")
 load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
 #---------------------------------------------------------------------------
 #Now for each pathway, we look at the high and low groups:
 phi_outputs = list()
+stat_tests = list()
+
 for(pathway_name in names(pb_var_list)){
 
 orpheus_input_i = pb_var_list[[pathway_name]]
@@ -2228,6 +2230,10 @@ phi_output_i =  list("tmm" = phi_results_i)
 names(phi_output_i) = pathway_name
 phi_outputs <- append(phi_outputs, phi_output_i)
 
+w_test = wilcox.test(phi~Source, data = phi_results_i)
+tests = list( list("wilcox" = w_test))
+names(tests) = pathway_name
+stat_tests <- append(stat_tests, tests)
 }
 
 all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
@@ -2235,6 +2241,10 @@ all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
 
 save(phi_outputs, file = "~/Desktop/rosmap_exc35_pathways_ad/rosmap_exc35_ad_pathway_phis.RData")
 save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_pathways_ad/rosmap_exc35_ad_pathway_phis_df.RData")
+
+wilcox_pvals <- sapply(stat_tests, function(x) x[["wilcox"]][["p.value"]])
+wilcox.df = data.frame("pval" = wilcox_pvals, "BHQ" = p.adjust(wilcox_pvals, method = "BH"))
+save(wilcox.df, file = "~/Desktop/rosmap_exc35_pathways_ad/wilcox_df.RData")
 ```
 
 ### Repeat Main analysis but running is_cycling and var_cycling on AD and CTL subjects together using custom_function_method2 above:
