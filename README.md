@@ -30,7 +30,10 @@ The tool is designed for use with circadian gene expression data, and is suited 
 
 To install Orpheus, clone this repository and install the package.
 
-See examples directory for help running Orpheus
+See examples directory for help running Orpheus.
+
+A Dockerfile is also included that can be used to build container with Orpheus. See build_and_run_docker.sh.
+
 
 📊 Features
 
