@@ -413,7 +413,7 @@ cell_types = c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "peri
 filenames <- as.vector(outer(cell_types, paste0("_seed", 1:4), paste0))
 
 
-sapply(filenames, plot_free_acrodiff_ejtk, var_sig = 0.1)
+sapply(filenames, plot_free_acrodiff_ejtk, var_sig = 0.05)
 ```
 
 ### ORPHEUS, using the genes provided by BootEJTK

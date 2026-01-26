@@ -1701,9 +1701,9 @@ plot(merged2$AMP, merged2$Amplitude)
 ```{r}
 
 plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
-  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_pb/ejtk_pb_results/",cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
+  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_pb/ejtk_pb_results/",cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
   # var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_var_nov26/", cell_type, "_double_freq_mat_free_Vash__boot10-rep4_GammaP.txt")
-    var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_var/", cell_type, "_double_freq_mat_residual_Vash__boot10-rep4_GammaP.txt")
+    var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_var/", cell_type, "_double_freq_mat_residual_Vash__boot10-rep4_GammaP.txt")
 
   pb_jtk_res = read.delim(pb_path, sep = "\t")
   var_jtk_res = read.delim(var_path, sep = "\t")
@@ -1716,6 +1716,32 @@ plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
 }
 
 sapply(c("avpnms", "vipgrp", "vipnms", "cckc1ql3"), plot_free_acrodiff_ejtk, var_sig = 0.1)
+```
+
+#### Do above in slightly different way
+
+Use the "all phase targeted results" this is where we searched for 12-hr rhythms of any phase. In practice, the difference between this and above was that this method necessitates using the -B flag for BootEJTK
+
+```{r}
+plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
+  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_pb/ejtk_pb_results/",cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
+    var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/SCN_targeted12rhythms_fixedAcroRegression_AllhrWidth/", cell_type, "_targeted_results_fixedAcroRegression_ALLhr_width.txt")
+
+  pb_jtk_res = read.delim(pb_path, sep = "\t")
+  var_jtk_res = read.delim(var_path, sep = "\t")
+
+  merged_res = merge(pb_jtk_res, var_jtk_res, by.x = "ID", by.y = "Gene", suffixes = c("_pb", "_var"))
+
+  merged_filt = dplyr::filter(merged_res, Pvalue < var_sig) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
+
+ hist(merged_filt$acrodiff, main = cell_type, breaks = seq(0, 12, by = 2))
+}
+
+cell_types = c("avpnms", "vipgrp", "vipnms", "cckc1ql3")
+
+
+
+sapply(cell_types, plot_free_acrodiff_ejtk, var_sig = 0.05)
 ```
 
 ### ORPHEUS on genes provided by BootEJTK

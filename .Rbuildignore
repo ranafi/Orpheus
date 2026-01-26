@@ -10,3 +10,4 @@ R/estimate_single_phi.R
 ^examples_old/
 Dockerfile
 build_and_run_docker.sh
+R/.Rhistory
