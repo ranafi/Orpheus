@@ -252,742 +252,6 @@ save(joined_seurat_obj, file = "~/Desktop/mouse_SCN_seurat_obj.RData")
 
 ```
 
-Load prepared seurat object:
-
-```{r}
-load("../../Mouse_SCN/mouse_SCN_seurat_obj.RData")
-```
-
-Custom cycling functions, ignore as batches are taken every 12 hours in this data, so adding batch to var_cycling will necessarily produce non linearly independent columns in the design matrix.
-
-```{r}
-
-is_cycling_custom <- function(times, pb_mat,meta_data, time_units = "hrs") {
-  `%do%` <- foreach::`%do%`
-  cat(paste("\nRunning is_cycling_custom()"))
-  gene1 = t(pb_mat)  # get the transpose, subjects x genes and put in order of CYCLOPS order
-   if(time_units == "hrs"){
-   cat(paste("\nRunning regression, converting hours to radians"))
-   times1 = times / 12 * pi
-  } else{
-    cat(paste("\nRunning regression assuming times are 0-2pi radians"))
-    times1 = times
-  }
-  batches = meta_data$batch[match(colnames(pb_mat), meta_data$timepoint)] %>% unname %>% unlist %>% as.factor()
-
-    #loop:
-  all_genes = foreach (gene_i = 1:ncol(gene1), .combine = rbind) %do%{
-    gexp1 = as.numeric(unlist(gene1[,gene_i]))
-    Gene_Symbols = colnames(gene1)[gene_i]
-    # Check for all zeros or zero variance
-    if (all(gexp1 == 0) || sd(gexp1) == 0) {
-      # Return NA row for this gene
-      return(c(Gene_Symbols, rep(NA, 11))) # columns to match the number of outputs
-    }
-
-    partial_model = lm(gexp1 ~ batches)
-    partial_model_AIC = AIC(partial_model)
-    partial_model_BIC = BIC(partial_model)
-
-    full_model = lm(gexp1 ~ sin(times1) + cos(times1)+batches )
-    full_model_AIC = AIC(full_model)
-    full_model_BIC = BIC(full_model)
-
-    design_matrix <- model.matrix(gexp1 ~ sin(times1) + cos(times1)+batches)
-
-    anova_results = anova(partial_model, full_model)
-    sin_coff = full_model[["coefficients"]][["sin(times1)"]]
-    cos_coeff = full_model[["coefficients"]][["cos(times1)"]]
-    acrophase_bulk = atan2(sin_coff, cos_coeff) %% (2*pi)
-
-    p_statistic = anova_results$`Pr(>F)`[2]
-    amplitude_bulk = sqrt(sin_coff^2 + cos_coeff^2)
-
-    mesor_bulk = mean(design_matrix[,-c(2, 3)] %*% full_model[["coefficients"]][-c(2, 3)])
-    # mesor_bulk = full_model$coefficients[["(Intercept)"]]
-
-    amp_ratio = amplitude_bulk / mesor_bulk
-
-
-
-   gene_summary = cbind( Gene_Symbols, acrophase_bulk,amplitude_bulk,
-              p_statistic, amp_ratio, sin_coff, cos_coeff, mesor_bulk,
-              partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC)
-
-    return(gene_summary)
-
-  }
-  all_genes = as_tibble(all_genes) %>% drop_na
-  all_genes$BHQ = p.adjust(as.numeric(all_genes$p_statistic), "BH")
-  all_genes$Bonf = p.adjust(as.numeric(all_genes$p_statistic), "bonferroni")
-  return(all_genes)
-
-}
-# 
-# var_cycling_custom <- function(times, var_mat, mean_mat, phase_pb,meta_data, time_units = "hrs") {
-#   `%do%` <- foreach::`%do%`
-#   cat(paste("\nRunning var_cycling()"))
-#   gene1 = t(var_mat)  # get the transpose, subjects x genes and put in order of CYCLOPS order
-#   means1 = t(mean_mat)
-#   if(time_units == "hrs"){
-#     cat(paste("\nRunning regression, converting hours to radians"))
-#     times1 = times / 12 * pi
-#   } else{
-#     cat(paste("\nRunning regression assuming times are 0-2pi radians"))
-#     times1 = times
-#   }
-#   batches = meta_data$batch[match(colnames(pb_mat), meta_data$timepoint)] %>% unname %>% unlist %>% as.factor()
-# 
-#   #loop:
-#   all_genes = foreach (gene_i = 1:ncol(gene1), .combine = rbind) %do%{
-#     gexp1 = as.numeric(unlist(gene1[,gene_i]))
-#     m1 = as.numeric(unlist(means1[, gene_i]))
-#     Gene_Symbols = colnames(gene1)[gene_i]
-#     phase_bulk = as.numeric(phase_pb[gene_i])
-# 
-# 
-#     # Check for all zeros or zero variance
-#     if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
-#       # Return NA row for this gene
-#       return(c(Gene_Symbols, rep(NA, 11))) #  columns to match the number of outputs
-#     }
-# 
-#     partial_model = lm(gexp1 ~ m1 + batches)
-#     partial_model_AIC = AIC(partial_model)
-#     partial_model_BIC = BIC(partial_model)
-# 
-#     full_model = lm(gexp1 ~ sin(2*times1) + cos(2*times1) + m1 + batches)
-#     full_model_AIC = AIC(full_model)
-#     full_model_BIC = BIC(full_model)
-# 
-#     design_matrix <- model.matrix(gexp1 ~ sin(2*times1) + cos(2*times1) + m1 + batches)
-# 
-#     anova_results = anova(partial_model, full_model)
-#     sin_coff = full_model[["coefficients"]][["sin(2 * times1)"]]
-#     cos_coeff = full_model[["coefficients"]][["cos(2 * times1)"]]
-#     double_freq_acrophase = atan2(sin_coff, cos_coeff) %% (2*pi) / 2
-# 
-#     #What is the amplitude of the fundamental according to the double frequency model?
-#     find_Af = lm(full_model$coefficients[["m1"]]*m1 ~ cos(times1) + sin(times1))
-#     fund_amp = sqrt(find_Af$coefficients[["sin(times1)"]]^2 + find_Af$coefficients[["cos(times1)"]]^2)
-#     fund_acro = atan2(find_Af$coefficients[["sin(times1)"]], find_Af$coefficients[["cos(times1)"]]) %% (2*pi)
-# 
-# 
-#     double_freq_p_statistic = anova_results$`Pr(>F)`[2]
-#     raw_2w_amp = sqrt(sin_coff^2 + cos_coeff^2)
-# 
-#     # #Calculate the 95% CI for double frequency phase
-#     # if(double_freq_amplitude > 1e-3){
-#     #   ## Extract coefficients and covariance ---------------
-#     #   b  <- coef(full_model)["cos(2 * times1)"]   # β̂
-#     #   g  <- coef(full_model)["sin(2 * times1)"]   # γ̂
-#     #   V  <- vcov(full_model)[c("cos(2 * times1)","sin(2 * times1)"),
-#     #                   c("cos(2 * times1)","sin(2 * times1)")]
-# 
-#     #   ## SE via delta method -------------------------------
-#     #   var.phi <- (g^2*V[1,1] + b^2*V[2,2] - 2*b*g*V[1,2]) / (b^2+g^2)^2
-#     #   se.phi  <- sqrt(var.phi)
-#     #   ## 95 % CI (in radians) ------------------------------
-#     #   phi.hat <- atan2(g, b)
-#     #   ci.phi  <- phi.hat + c(-1, 1)*qnorm(0.975)*se.phi
-#     # }
-# 
-#     #Amp of double frequency variance wave projected onto expected bulk wave.
-#     double_freq_amplitude = -cos_coeff * cos(2 * phase_bulk) - sin_coff * sin(2 * phase_bulk)
-# 
-#     #MESOR or mean of the fitted variance wave
-#     # var_mesor = mean( full_model$fitted.values)
-#     var_mesor = mean(design_matrix[,-c(2, 3)] %*% full_model[["coefficients"]][-c(2, 3)])
-# 
-#     gene_summary = cbind( Gene_Symbols, double_freq_acrophase, double_freq_amplitude,
-#           double_freq_p_statistic, fund_amp, fund_acro, var_mesor,
-#           partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC, raw_2w_amp)
-# 
-# 
-# 
-#     return(gene_summary)
-# 
-#   }
-#   all_genes = as_tibble(all_genes) %>% drop_na
-#   all_genes$BHQ = p.adjust(as.numeric(all_genes$double_freq_p_statistic), "BH")
-#   all_genes$Bonf = p.adjust(as.numeric(all_genes$double_freq_p_statistic), "bonferroni")
-#   return(all_genes)
-# 
-# }
-```
-
-### Do Orpheus on neuron subclusters:
-
-```{r}
-
-joined_seurat_obj = subset(joined_seurat_obj, subset = !is.na(neuron_subcluster))
-
-s_obj = prepare_seurat_for_orpheus(seurat_obj = joined_seurat_obj, assay = "RNA", min_prop = 0.001)
-
-# s_obj@meta.data$neuron_subcluster_coarse <- case_when(
-#     s_obj$neuron_subcluster == "cck/bdnf" ~ "cck",
-#     s_obj$neuron_subcluster == "vip/nms" ~ "vip",
-#     s_obj$neuron_subcluster == "cck/c1ql3" ~ "cck",
-#     s_obj$neuron_subcluster == "vip/grp" ~ "vip",
-#     TRUE ~ s_obj$neuron_subcluster
-#   )
-# 
-# 
-# s_obj@meta.data$core_shell <- case_when(
-#     s_obj$neuron_subcluster == "vip/nms" ~ "core",
-#     s_obj$neuron_subcluster == "vip/grp" ~ "core",
-#     s_obj$neuron_subcluster == "cck/bdnf" ~ "shell",
-#     s_obj$neuron_subcluster == "cck/c1ql3" ~ "shell",
-#     s_obj$neuron_subcluster == "avp/nms" ~ "shell",
-#     TRUE ~ s_obj$neuron_subcluster
-#   )
-
-orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = names(table(s_obj$neuron_subcluster)), grouping_var = "neuron_subcluster")
-
-
-# #I need to make sure all the times/batch are equal among individual_ID:
-# s_obj@meta.data %>%
-#   group_by(orig.ident) %>%
-#   summarise(
-#     across(c(batch, timepoint), ~n_distinct(.x))
-#   ) %>% View
-
-#Since assumption is correct, this code below correctly gets metadata for each subject:
-subject_meta <- s_obj@meta.data %>%
-  group_by(orig.ident) %>%
-  summarise(
-    batch = first(batch),
-    timepoint = first(timepoint)  )
-
-cluster_phis = list()
-for(cell_type in names(orpheus_inputs)){
-  
-print(paste("Analyzing condition", cell_type))
-
-
-tmp = orpheus_inputs[[cell_type]]
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
-counts = tmp[[3]]
-
-
-vars = sparseMatrixStats::rowVars(counts)
-means = sparseMatrixStats::rowMeans2(counts)
-agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
-rownames(agg_theta_meas) = rownames(pb_mat)
-
-
-#Recover time in hours that sample was collected
-
-matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
-ZT = as.numeric(matches[,2])
-print(ZT)
-
-#Call cosinor regression methods, where phases of variance wave are fixed:
-# pb_cycling1 = is_cycling(ZT, pb_mat, time_units = "hrs")
-pb_cycling = is_cycling_custom(ZT, pb_mat, meta_data = subject_meta, time_units = "hrs")
-# test = merge(pb_cycling1, pb_cycling, by = "Gene_Symbols", suffixes = c("", "_batch")) %>%   mutate(across(-Gene_Symbols, as.numeric))
-# plot(test$acrophase_bulk, test$acrophase_bulk_batch)
-
-phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
-
-var_mat = var_mat[phase_pb$Gene_Symbols,]
-pb_mat = pb_mat[phase_pb$Gene_Symbols,]
-
-stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
-stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
-
-phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
-#hist(as.numeric(phase_pb))
-
-var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-# var_cyclers = var_cycling(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-
-
-bulk_amp_thr = 0.05
-
-input_cos = var_cyclers %>% 
-    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
-   # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
-    filter(amplitude_bulk >= bulk_amp_thr) %>%
-    column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC_var > full_model_AIC_var)
-
-phi <- tryCatch(
-  {
-    calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = bulk_amp_thr)
-  },
-  error = function(e) {
-    message("calc_phi failed: ", e$message)
-    return(NA)   
-  }
-)
-if(all(is.na(phi))){
- next
-}
-
-# plot_rhythms(ZT, var_mat, pb_mat, plot_me = c("Akap17b"))
-
-output_cos_tmm = merge(phi, input_cos, by = 0)
-# output = merge(output_cos_tmm, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
-output = merge(output_cos_tmm, agg_theta_meas, by.x = "Row.names", by.y = 0)
-
-
-local_res =  list("tmm" = output)
-names(local_res) =cell_type
-cluster_phis <- append(cluster_phis, list(local_res))
-
-}
-
-
-```
-
-### Combine phis calculated
-
-```{r}
-cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-  current_df <- cluster_phis[[source_name]][[1]]
-  current_df$Source <- names(cluster_phis[[source_name]][1])
-  current_df
-}))
-
-
-cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
-table(cos_phis_tmm_filt$Source)
-
-# save(cos_phis_tmm, file = "figures/mouse_SCN/mouse_SCN_neuronSubtype_phis.RData")
-```
-
-Box plots
-
-```{r}
-library(ggplot2)
-plot_df = (cos_phis_tmm_filt)
-
-custom_colors <- c("avp/nms" = "#F8766D", "cck/bdnf" = "#E68613", "cck/c1ql3" = "#ABA300", "vip/grp" = "#0CB702", "vip/nms" = "#00BFC4")
-
-vip_cck_phi_boxplot = ggplot(plot_df, aes(x = Source,y =  phi*12/pi, fill = Source))+
-  geom_boxplot(outlier.shape = NA)+
-  theme_minimal()+
-  xlab("Cell type")+
-  ylab("Prediceted phase std. (hr)")+
-  geom_jitter(width = 0.1, alpha = 0.5) +
-  scale_fill_manual(values = custom_colors) +
-  theme(
-    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12),   # Increase legend title size
-    legend.position = "none"
-  )
-
-ggsave("~/Desktop/vip_cck_phi_boxplot.pdf", vip_cck_phi_boxplot, device = "pdf", width = 6, height = 5)
-
-kruskal.test(phi ~ Source, data = plot_df)
-pairwise.wilcox.test(plot_df$phi, plot_df$Source,
-                 p.adjust.method = "BH")
-
-
-vip_cck_Ac_boxplot = ggplot(plot_df, aes(x = Source,y =  log(Ac), fill = Source))+
-  geom_boxplot(outlier.shape = NA)+
-  theme_minimal()+
-  xlab("Cell type")+
-  ylab("Log(prediceted cell amp.)")+
-  geom_jitter(width = 0.1, alpha = 0.5) +
-  scale_fill_manual(values = custom_colors) +
-  theme(
-    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12),   # Increase legend title size
-    legend.position = "none"
-  )
-
-ggsave("~/Desktop/vip_cck_Ac_boxplot.pdf", vip_cck_Ac_boxplot, device = "pdf", width = 6, height = 5)
-
-vip_cck_bulkAmp_boxplot = ggplot(plot_df, aes(x = Source,y =  log(amplitude_bulk), fill = Source))+
-  geom_boxplot(outlier.shape = NA)+
-  theme_minimal()+
-  xlab("Cell type")+
-  ylab("Log(measured bulk amp.)")+
-  geom_jitter(width = 0.1, alpha = 0.5) +
-  scale_fill_manual(values = custom_colors) +
-  theme(
-    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12),   # Increase legend title size
-    legend.position = "none"
-  )
-
-ggsave("~/Desktop/vip_cck_bulkAmp_boxplot.pdf", vip_cck_bulkAmp_boxplot, device = "pdf", width = 6, height = 5)
-
-mouse_SCN_acrodiff_compare = ggplot(plot_df, aes(x = acrodiff*12/pi, fill = Source)) +
-  geom_histogram(binwidth = 2, color = "black", alpha = 1) +
-  facet_wrap(~ as.factor(Source), scales = "free_y") +
-  scale_fill_manual(values = custom_colors) +
-  guides(fill = "none") +    # remove fill legend
-  xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
-  ylab("Count")+
-  theme_bw()+
-  theme(
-    strip.background = element_blank(),
-    strip.text = element_text(color = "black", size = 12),
-    axis.text.x = element_text(size = 14),    # Increase x-axis text size
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12)    # Increase legend title size
-  )+
-   # Use scale_x_continuous for precise control over the x-axis
-  scale_x_continuous(
-    limits = c(0, 12), 
-    breaks = seq(0, 12, by = 3), 
-    expand = c(0, 0)
-  )
-
-ggsave("~/Desktop/mouse_SCN_acrodiff_compare.pdf", plot = mouse_SCN_acrodiff_compare, device = "pdf", width = 7, height = 5)
-
-
-```
-
-### Add Takahashi data on mouse SCN phase spread:
-
-```{r}
-library(ggplot2)
-library(ggrepel) # For non-overlapping text labels
-
-jitter_width <- 0.15
-jitter_seed <- 123 # A specific seed for reproducibility
-
-
-# List of core clock genes
-clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2", "HLF", "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
-
-# Combine into a single, long-format data frame
-orpheus_df <- filter(cos_phis_tmm_filt, Source != "avp/nms")
-orpheus_df$cell_type <- case_when(
-    orpheus_df$Source == "cck/bdnf" ~ "SCN Cck+/Bdnf+\nneurons",
-    orpheus_df$Source == "vip/nms" ~ "SCN Vip+/Nms+\nneurons",
-    orpheus_df$Source == "cck/c1ql3" ~ "SCN Cck+/C1ql3+\nneurons",
-    orpheus_df$Source == "vip/grp" ~ "SCN Vip+/Grp+\nneurons",
-    TRUE ~ NA
-  )
-
-# Add a column for labeling ONLY the clock genes
-orpheus_df$gene_label <- ifelse(toupper(orpheus_df$Row.names) %in% clock_genes, orpheus_df$Row.names, NA)
-orpheus_df$phi_hrs = orpheus_df$phi *12 / pi
-
-#Published Data
-published_phis <- c(1.3235566 ,3.4047716, 0.5998745)
-published_summary <- data.frame(
-  # Use a clear name for the x-axis category
-  cell_type = factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
-  mean_phi = mean(published_phis),
-  sd_phi = sd(published_phis)
-)
-published_points <- data.frame(
-  cell_type =  factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
-  phi = c(1.3235566 ,3.4047716, 0.5998745)
-)
-
-
-# Set the order of the categories on the x-axis
-category_order <- c("SCN Vip+/Nms+\nneurons", "SCN Vip+/Grp+\nneurons",
-                    "SCN Cck+/Bdnf+\nneurons","SCN Cck+/C1ql3+\nneurons",
-                    "Published PER2::luc Assay\n(Shan et al. 2020)")
-orpheus_df$cell_type <- factor(orpheus_df$cell_type, levels = category_order)
-published_summary$cell_type <- factor(published_summary$cell_type, levels = category_order)
-
-
-# The Plot
-p <- ggplot() +
-  
-  # # Shaded region for the published data range for easy comparison
-  # geom_rect(
-  #   data = published_summary,
-  #   aes(xmin = -Inf, xmax = Inf, 
-  #       ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
-  #   fill = "grey90", alpha = 0.5
-  # ) +
- # Shaded region for the published data range for easy comparison
- geom_rect(
-   data = published_points,
-   aes(xmin = -Inf, xmax = Inf,
-       ymin = min(phi), ymax = max(phi)),
-   fill = "grey90", alpha = 0.5
- ) +
-  # Boxplots for the ORPHEUS data
-  geom_boxplot(
-    data = orpheus_df,
-    aes(x = cell_type, y = phi_hrs, fill = cell_type),
-    width = 0.5,
-    outlier.shape = NA # We will plot the points ourselves
-  ) +
-  # Violin for the ORPHEUS data
-  # geom_violin(
-  #   data = orpheus_df,
-  #   aes(x = cell_type, y = phi_hrs, fill = cell_type)
-  # ) +
-  
-
-  # Individual gene points (jittered) for ORPHEUS data
-  geom_jitter(
-    data = orpheus_df, 
-    aes(x = cell_type, y = phi_hrs), 
-    alpha = 0.7,
-    position = position_jitter(width = jitter_width, seed = jitter_seed)
-  ) +
-  
-  # # The published data point estimate with error bars
-  # geom_pointrange(
-  #   data = published_summary,
-  #   aes(x = cell_type, y = mean_phi, ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
-  #   size = 1, 
-  #   fatten = 3, # Makes the point larger
-  #   color = "black",
-  #   shape = 18 # A diamond shape to distinguish it
-  # ) +
-    # The published data point estimates
-  geom_point(
-    data = published_points,
-    aes(x = cell_type, y = phi),
-    alpha = 0.7,
-    color = "black",
-  ) +
-  
-  # The Gene Labels (using ggrepel)
-  #geom_text_repel(
-  #  data = orpheus_df,
-  #  aes(x = cell_type, y = phi_hrs, label = gene_label),
-  #  position = position_jitter(width = jitter_width, seed = jitter_seed),
-  #  box.padding = 0.5,         # More space around labels
-  #  point.padding = 0.5,       # Space from the point
-  #  min.segment.length = 0,    # Draw lines even for close labels
-  #  max.overlaps = Inf,        # Ensure all labels are shown
-  #  fontface = "italic",       # Italicize gene names
-  #  size = 4,
-  #) +
-  
-  # Aesthetics and Labels
-  scale_fill_manual(values = c("SCN Vip+/Nms+\nneurons" = "#018571", "SCN Cck+/Bdnf+\nneurons" = "#dfc27d", "SCN Cck+/C1ql3+\nneurons" ="#80cdc1", "SCN Vip+/Grp+\nneurons" = "#a6611a")) +
-  labs(
-    title = "ORPHEUS Quantifies Cell-Type-Specific Synchrony in the SCN",
-    subtitle = "Phase dispersion estimates are consistent with experimental data from PER2::luc assays",
-    x = "", # No x-axis label needed
-    y = "Phase dispersion (hrs)"
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "none", # The x-axis labels are sufficient
-    plot.title = element_text(face = "bold"),
-    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12),   # Increase legend title size
-  )
-
-# Display the plot
-print(p)
-ggsave("~/Desktop/mouse_SCN_phi_w_takahashi_estimate.pdf",p, device = "pdf", width = 6, height = 7)
-
-
-#Updated histogram
-mouse_SCN_acrodiff_compare2 = ggplot(orpheus_df, aes(x = acrodiff*12/pi, fill = cell_type)) +
-  geom_histogram(binwidth = 2, color = "black", alpha = 1, breaks = seq(0, 12, by = 2)) +
-  facet_wrap(~ as.factor(cell_type), scales = "free_y") +
-    scale_fill_manual(values = c("SCN Vip+/Nms+\nneurons" = "#018571", "SCN Cck+/Bdnf+\nneurons" = "#dfc27d", "SCN Cck+/C1ql3+\nneurons" ="#80cdc1", "SCN Vip+/Grp+\nneurons" = "#a6611a")) +
-  guides(fill = "none") +    # remove fill legend
-  xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
-  ylab("Count")+
-  theme_bw()+
-  theme(
-    strip.background = element_blank(),
-    strip.text = element_text(color = "black", size = 12),
-    axis.text.x = element_text(size = 14),    # Increase x-axis text size
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12)    # Increase legend title size
-  )+
-   # Use scale_x_continuous for precise control over the x-axis
-  scale_x_continuous(
-    limits = c(0, 12), 
-    breaks = seq(0, 12, by = 4), 
-    expand = c(0, 0)
-  )
-
-ggsave("~/Desktop/mouse_SCN_acrodiff_compare_fixedAxisLabel.pdf", plot = mouse_SCN_acrodiff_compare2, device = "pdf", width = 5, height = 5)
-```
-
-### Repeat With Pseudoreplicates
-
-```{r}
-s_obj = prepare_seurat_for_orpheus(seurat_obj = joined_seurat_obj, assay = "RNA" )
-
-s_obj@meta.data$neuron_subcluster_coarse <- case_when(
-    s_obj$neuron_subcluster == "cck/bdnf" ~ "cck",
-    s_obj$neuron_subcluster == "vip/nms" ~ "vip",
-    s_obj$neuron_subcluster == "cck/c1ql3" ~ "cck",
-    s_obj$neuron_subcluster == "vip/grp" ~ "vip",
-    TRUE ~ s_obj$neuron_subcluster
-  )
-
-
-s_obj@meta.data$core_shell <- case_when(
-    s_obj$neuron_subcluster == "vip/nms" ~ "core",
-    s_obj$neuron_subcluster == "vip/grp" ~ "core",
-    s_obj$neuron_subcluster == "cck/bdnf" ~ "shell",
-    s_obj$neuron_subcluster == "cck/c1ql3" ~ "shell",
-    s_obj$neuron_subcluster == "avp/nms" ~ "shell",
-    TRUE ~ s_obj$neuron_subcluster
-  )
-
-subject_meta <- s_obj@meta.data %>%
-  group_by(orig.ident) %>%
-  summarise(
-    batch = first(batch),
-    timepoint = first(timepoint)  )
-
-pseudorep_meta <- subject_meta[rep(seq_len(nrow(subject_meta)), each = 2), ]
-
-seeds <- c(1,2,3,4)
-#Initialize an empty list to store all results
-all_results_combined <- list()
-for(i in seeds){
-  message(paste("--- Running ORPHEUS with seed:", i, "---"))
-    
-    # returns a list like: list('CellTypeA' = ..., 'CellTypeB' = ...)
-    results_one_seed <- calculate_orpheus_inputs(
-      s_obj, 
-      groups_to_analyze = c("shell", "core"), 
-      grouping_var = "core_shell", 
-      num_replicates = 2, 
-      random_seed = i
-    )
-    
-    
-    # Modify the names to include the seed identifier
-    # prevents name clashes when we combine the lists.
-    original_names <- names(results_one_seed)
-    new_names <- paste0(original_names, "_seed", i)
-    names(results_one_seed) <- new_names
-    
-    # Append the newly named results to main list
-    all_results_combined <- c(all_results_combined, results_one_seed)
-}
-# Check the names of the final combined list
-print("Names of the final combined list:")
-print(names(all_results_combined))
-save(all_results_combined, file = "mouse_SCN_4_seeds_pb_var_counts_list.RData")
-#######Load results from above #######
-load("mouse_SCN_4_seeds_pb_var_counts_list.RData")
-
-cluster_phis = list()
-for(cell_type in names(all_results_combined)){
-  
-print(paste("Analyzing", cell_type))
-
-
-# tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
-tmp = all_results_combined[[cell_type]]
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
-counts = tmp[[3]]
-
-
-vars = sparseMatrixStats::rowVars(counts)
-means = sparseMatrixStats::rowMeans2(counts)
-agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
-rownames(agg_theta_meas) = rownames(pb_mat)
-
-
-#Recover time in hours that sample was collected
-matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
-ZT = as.numeric(matches[,2])
-print(ZT)
-
-#rename cols to use is_cycling_custom
-colnames(pb_mat) = str_replace(colnames(pb_mat), "_rep[1-9]*", "") 
-stopifnot(all.equal(as.numeric(colnames(pb_mat)), ZT))
-
-#Call cosinor regression methods, where phases of variance wave are fixed:
-# pb_cycling1 = is_cycling(ZT, pb_mat, time_units = "hrs")
-pb_cycling = is_cycling_custom(ZT, pb_mat, meta_data = pseudorep_meta, time_units = "hrs")
-# test = merge(pb_cycling1, pb_cycling, by = "Gene_Symbols", suffixes = c("", "_batch")) %>%   mutate(across(-Gene_Symbols, as.numeric))
-# plot(test$acrophase_bulk, test$acrophase_bulk_batch)
-
-phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
-
-var_mat = var_mat[phase_pb$Gene_Symbols,]
-pb_mat = pb_mat[phase_pb$Gene_Symbols,]
-
-stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
-stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
-
-phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
-#hist(as.numeric(phase_pb))
-
-var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-
-bulk_amp_thr = 0.05
-
-input_cos = var_cyclers %>% 
-    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
-    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
-    filter(amplitude_bulk >= bulk_amp_thr) %>%
-    column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC_var > full_model_AIC_var)
-
-phi <- tryCatch(
-  {
-    calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = bulk_amp_thr)
-  },
-  error = function(e) {
-    message("calc_phi failed: ", e$message)
-    return(NA)   
-  }
-)
-if(all(is.na(phi))){
- next
-}
-
-# plot_rhythms(ZT, var_mat, pb_mat, plot_me = c("Akap17b"))
-
-output_cos_tmm = merge(phi, input_cos, by = 0)
-# output = merge(output_cos_tmm, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
-output = merge(output_cos_tmm, agg_theta_meas, by.x = "Row.names", by.y = 0)
-
-
-local_res =  list("tmm" = output)
-names(local_res) =cell_type
-cluster_phis <- append(cluster_phis, list(local_res))
-}
-
-```
-
-### combine phis for this analysis
-
-```{r}
-cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-  current_df <- cluster_phis[[source_name]][[1]]
-  current_df$Source <- names(cluster_phis[[source_name]][1])
-  current_df
-}))
-
-save(cos_phis_tmm, file = "~/Desktop/SCN_phis_2pr_4folds_unfilt_fixed_acro.RData")
-```
-
 ### COMBAT: Remove batch effects in expression then do cycling analysis
 
 ```{r}
@@ -1016,384 +280,7 @@ s_obj[["ORPHEUS_norm_ComBat"]] <- CreateAssayObject(counts = combat_corrected_ex
 
 # save(s_obj, file = "../examples_fixed_acrophase/figures/mouse_SCN/mouse_SCN_neuronSubset_seurat_obj_w_combat_assay.RData")
 load("../examples_fixed_acrophase/figures/mouse_SCN/mouse_SCN_neuronSubset_seurat_obj_w_combat_assay.RData")
-orpheus_inputs_combat = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("avp/nms","cck/bdnf","cck/c1ql3","vip/grp", "vip/nms"), grouping_var = "neuron_subcluster", assay_to_use = "ORPHEUS_norm_ComBat" )
 
-orpheus_inputs= calculate_orpheus_inputs(s_obj, groups_to_analyze = c("avp/nms","cck/bdnf","cck/c1ql3","vip/grp", "vip/nms"), grouping_var = "neuron_subcluster", assay_to_use = "ORPHEUS_norm" )
-
-
-#How well are the pseudobulks correlated?
-pb_cor_list <- lapply(seq_along(orpheus_inputs), function(i) {
-  dfA <- orpheus_inputs[[i]][[1]]
-  dfB <- orpheus_inputs_combat[[i]][[1]]
-
-  # Check dimensions match
-  if (!all(dim(dfA) == dim(dfB))) {
-    stop(paste("Dimensions differ in sublist", i))
-  }
-
-  # Compute correlation between corresponding rows
-  # Transpose since cor() computes column correlations by default
-  sapply(seq_len(nrow(dfA)), function(j) cor(unname(unlist(dfA[j, ])), unname(unlist(dfB[j, ]))))
-})
-
-#How well are the gene variances correlated?
-var_cor_list <- lapply(seq_along(orpheus_inputs), function(i) {
-  dfA <- orpheus_inputs[[i]][[2]]
-  dfB <- orpheus_inputs_combat[[i]][[2]]
-
-  # Check dimensions match
-  if (!all(dim(dfA) == dim(dfB))) {
-    stop(paste("Dimensions differ in sublist", i))
-  }
-
-  # Compute correlation between corresponding rows
-  # Transpose since cor() computes column correlations by default
-  sapply(seq_len(nrow(dfA)), function(j) cor(unname(unlist(dfA[j, ])), unname(unlist(dfB[j, ]))))
-})
-
-jaccard <- function(a, b) {
-    intersection = length(intersect(a, b))
-    union = length(a) + length(b) - intersection
-    return (intersection/union)
-}
-
-
-cluster_phis = list()
-
-for( cell_type in names(orpheus_inputs_combat)){
-cell_type_str = str_replace_all(cell_type, "/", "")
-
-tmp = orpheus_inputs_combat[[cell_type]]
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
-counts = tmp[[3]]
-
-
-#Recover time in hours that sample was collected
-
-matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
-ZT = as.numeric(matches[,2])
-print(ZT)
-
-vars = sparseMatrixStats::rowVars(counts)
-means = sparseMatrixStats::rowMeans2(counts)
-agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
-rownames(agg_theta_meas) = rownames(pb_mat)
-times = colnames(orpheus_inputs_combat$`avp/nms`$pseudobulk_tmm_matrix) %>% as.numeric
-
-# subject_meta <- s_obj@meta.data %>%
-#   group_by(orig.ident) %>%
-#   summarise(
-#     batch = first(batch),
-#     timepoint = first(timepoint)  )
-# 
-# pb_cycling_w_batch = is_cycling_custom(times, pb_mat = orpheus_inputs$`avp/nms`$pseudobulk_tmm_matrix,meta_data = subject_meta, time_units = "hrs")
-pb_cycling = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
-
-# plot(as.numeric(pb_cycling_w_batch$acrophase_bulk), as.numeric(pb_cycling$acrophase_bulk))
-# A = pb_cycling_w_batch %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols)
-# B = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols)
-# intersect(A, B)
-
-
-phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
-var_mat = var_mat[phase_pb$Gene_Symbols,]
-pb_mat = pb_mat[phase_pb$Gene_Symbols,]
-stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
-stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
-phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
-#hist(as.numeric(phase_pb))
-# var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-var_cyclers = var_cycling(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-
-
-# cosinor_results = var_cyclers %>% 
-#     left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-#     mutate(across(-Gene_Symbols, as.numeric)) %>%
-#     mutate(pb_sig = ifelse(p_statistic < 0.05, T, F))%>%
-#     mutate(var_sig = ifelse(partial_model_AIC_var > full_model_AIC_var, T, F)) %>%
-#   mutate(var_sig_p = ifelse(double_freq_p_statistic < 0.05, T, F))
-# # Convert to list of sets
-# sets <- list(
-#   pb_cyclers = which(cosinor_results$pb_sig),
-#   var_cyclers_AIC = which(cosinor_results$var_sig),
-#   var_cyclers_p = which(cosinor_results$var_sig_p))
-# library(ggvenn)
-# cosinor_jaccard = jaccard(sets$pb_cyclers, sets$var_cyclers_AIC) %>% round(., 3)
-# p1 = ggvenn(sets, fill_color = c("skyblue", "pink", "lightgreen")) + ggtitle(paste(cell_type, "jaccard =", cosinor_jaccard))
-# ggsave(paste0("~/Desktop/mouse_SCN_meta_output/", cell_type_str, "_CosinorOverlap.pdf"), plot = p1, device = "pdf")
-# 
-# 
-# meta2d_output_list = cycling_meta2d(ZT, var_mat = var_mat, mean_mat =pb_mat, out_file_circ = paste0("12hr_var_",cell_type_str,".txt"), out_file_mean = paste0("24hr_var_",cell_type_str,".txt"), out_file_pb = paste0("24hr_pb_",cell_type_str,".txt"), out_dir = "~/Desktop/mouse_SCN_meta_output/")
-# 
-# meta2d_results = meta2d_output_list$double_freq_results %>% 
-#     left_join(meta2d_output_list$pb_results, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-#     mutate(across(-Gene_Symbols, as.numeric)) %>%
-#     mutate(pb_sig = ifelse(p_statistic < 0.05, T, F))%>%
-#     mutate(var_sig_p = ifelse(double_freq_p_statistic < 0.05, T, F))
-# sets2 <- list(
-#   pb_cyclers = which(meta2d_results$pb_sig),
-#   var_cyclers_p = which(meta2d_results$var_sig_p))
-# meta_jaccard = jaccard(sets2$pb_cyclers, sets2$var_cyclers_p) %>% round(., 3)
-# 
-# p2 = ggvenn(sets2, fill_color = c("skyblue", "pink"))+ ggtitle(paste(cell_type, "jaccard =", meta_jaccard))
-# ggsave(paste0("~/Desktop/mouse_SCN_meta_output/", cell_type_str, "_JTKoverlap.pdf"), plot = p2, device = "pdf")
-
-# # var_compare = merge(var_cosinor_results, meta2d_results$double_freq_results, by = "Gene_Symbols", suffixes = c("_c", "_m")) %>% mutate(across(-Gene_Symbols, as.numeric))
-# 
-# # plot(var_compare$double_freq_acrophase_c, var_compare$JTK_double_freq_acrophase)
-# # plot(log(abs(var_compare$raw_2w_amp)), log(var_compare$double_freq_amplitude_m))
-# # var_compare %>% filter(double_freq_p_statistic_c < 0.05) %>% nrow
-# # var_compare %>% filter(double_freq_p_statistic_m < 0.05) %>% nrow
-# 
-# bulk_amp_thr = 0.1
-# # input <- reduce(meta2d_results, full_join, by = "Gene_Symbols") %>% 
-# #           mutate(across(-Gene_Symbols, as.numeric)) %>%
-# #           filter(p_statistic < 0.05) %>%
-# #           mutate(acrodiff = (JTK_double_freq_acrophase - JTK_acrophase_bulk) %% 12) %>%
-# #    filter(JTK_amplitude_bulk >= bulk_amp_thr) %>%
-# #     column_to_rownames("Gene_Symbols")%>%
-# #     filter(double_freq_p_statistic <0.05)
-# 
-# 
-# 
-# 
-bulk_amp_thr = 0.05
-input_cos = var_cyclers %>%
-    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
-    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
-    filter(amplitude_bulk >= bulk_amp_thr) %>%
-    column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC_var > full_model_AIC_var)
-
-phi <- tryCatch(
-  {
-    calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = bulk_amp_thr)
-  },
-  error = function(e) {
-    message("calc_phi failed: ", e$message)
-    return(NA)
-  }
-)
-if(all(is.na(phi))){
- next
-}
-
-output_cos_tmm = merge(phi, input_cos, by = 0)
-output = merge(output_cos_tmm, agg_theta_meas, by.x = "Row.names", by.y = 0)
-
-
-local_res =  list("tmm" = output)
-names(local_res) =cell_type
-cluster_phis <- append(cluster_phis, list(local_res))
-
-
-}
-
-cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-  current_df <- cluster_phis[[source_name]][[1]]
-  current_df$Source <- names(cluster_phis[[source_name]][1])
-  current_df
-}))
-
-save(cos_phis_tmm, file = "./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_free.RData")
-
-cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
-table(cos_phis_tmm_filt$Source)
-```
-
-out of curiosity, how different are the cycling parameters if I pseudobulk then combat?
-
-```{r}
-#I already have the combat -> pseudobulk in object orpheus_inputs_combat
-#Now I need
-
-log_norm_counts_vipnms <- log1p(orpheus_inputs$`vip/nms`$pseudobulk_tmm_matrix)  # log(1 + x)
-
-batches_pb = factor(rep(c(1,2,3), 4))
-
-combat_corrected_post_pb_vipnms <- ComBat(
-  dat = as.matrix(log_norm_counts_vipnms),
-  batch = batches_pb,
-  par.prior = TRUE,
-  prior.plots = FALSE
-)
-
-combat_corrected_post_pb_vipnms_exp = expm1(combat_corrected_post_pb_vipnms)
-times = as.numeric(colnames(log_norm_counts_vipnms))
-
-pb_cycling_pbThenCombat_vipnms = is_cycling(times = times, pb_mat = combat_corrected_post_pb_vipnms_exp, time_units = "hrs")
-
-pb_cycling_combatThenPb_vipnms = is_cycling(times= times, pb_mat = orpheus_inputs_combat$`vip/nms`$pseudobulk_tmm_matrix, time_units = "hrs")
-
-merged_res = merge(pb_cycling_pbThenCombat_vipnms, pb_cycling_combatThenPb_vipnms, by = "Gene_Symbols", suffixes = c("_pbC", "_Cpb")) %>% mutate(across(-Gene_Symbols, as.numeric)) %>% 
-  mutate(sigCpb = ifelse(p_statistic_Cpb < 0.05, T, F)) %>%
-  mutate(sigpbC = ifelse(p_statistic_pbC < 0.05, T, F))
-
-plot(merged_res$acrophase_bulk_pbC, merged_res$acrophase_bulk_Cpb)
-plot(log(merged_res$amplitude_bulk_pbC), log(merged_res$amplitude_bulk_Cpb))
-lines(c(-100,100), c(-100,100))
-
-plot(log(merged_res$mesor_bulk_pbC), log(merged_res$mesor_bulk_Cpb))
-lines(c(-100,100), c(-100,100))
-
-table(merged_res$sigCpb)
-table(merged_res$sigpbC)
-table(merged_res$sigCpb, merged_res$sigpbC)
-
-test_genes = filter(merged_res, sigpbC == T & sigCpb == F) %>% arrange(p_statistic_pbC)
-
-plot(times, combat_corrected_post_pb_vipnms_exp["Mrpl34", ])
-plot(times, orpheus_inputs_combat$`vip/nms`$pseudobulk_tmm_matrix["Mrpl34", ])
-
-plot(combat_corrected_post_pb_vipnms_exp["Mrpl34", ], orpheus_inputs_combat$`vip/nms`$pseudobulk_tmm_matrix["Mrpl34", ])
-lines(c(0,100), c(0,100))
-```
-
-plotting the acrophase_free_projection results from 2 cells up
-
-```{r}
-library(ggplot2)
-library(ggrepel) # For non-overlapping text labels
-orpheus_df = cos_phis_tmm_filt
-jitter_width <- 0.15
-jitter_seed <- 123 # A specific seed for reproducibility
-
-
-# List of core clock genes
-clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2", "HLF", "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
-
-# Combine into a single, long-format data frame
-# orpheus_df <- filter(cos_phis_tmm_filt, Source != "avp/nms")
-orpheus_df$cell_type <- case_when(
-    orpheus_df$Source == "cck/bdnf" ~ "SCN Cck+/Bdnf+\nneurons",
-    orpheus_df$Source == "vip/nms" ~ "SCN Vip+/Nms+\nneurons",
-    orpheus_df$Source == "cck/c1ql3" ~ "SCN Cck+/C1ql3+\nneurons",
-    orpheus_df$Source == "vip/grp" ~ "SCN Vip+/Grp+\nneurons",
-    orpheus_df$Source == "avp/nms" ~ "SCN Avp+/Nms+\nneurons",
-    TRUE ~ NA
-  )
-
-# Add a column for labeling ONLY the clock genes
-orpheus_df$gene_label <- ifelse(toupper(orpheus_df$Row.names) %in% clock_genes, orpheus_df$Row.names, NA)
-orpheus_df$phi_hrs = orpheus_df$phi *12 / pi
-
-#Published Data
-published_phis <- c(1.3235566 ,3.4047716, 0.5998745)
-published_summary <- data.frame(
-  # Use a clear name for the x-axis category
-  cell_type = factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
-  mean_phi = mean(published_phis),
-  sd_phi = sd(published_phis)
-)
-published_points <- data.frame(
-  cell_type =  factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
-  phi = c(1.3235566 ,3.4047716, 0.5998745)
-)
-
-
-# Set the order of the categories on the x-axis
-category_order <- c("SCN Avp+/Nms+\nneurons",
-                    "SCN Vip+/Nms+\nneurons", "SCN Vip+/Grp+\nneurons",
-                    "SCN Cck+/Bdnf+\nneurons","SCN Cck+/C1ql3+\nneurons",
-                    "Published PER2::luc Assay\n(Shan et al. 2020)")
-orpheus_df$cell_type <- factor(orpheus_df$cell_type, levels = category_order)
-published_summary$cell_type <- factor(published_summary$cell_type, levels = category_order)
-
-
-# The Plot
-p <- ggplot() +
-  
-  # # Shaded region for the published data range for easy comparison
-  # geom_rect(
-  #   data = published_summary,
-  #   aes(xmin = -Inf, xmax = Inf, 
-  #       ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
-  #   fill = "grey90", alpha = 0.5
-  # ) +
- # Shaded region for the published data range for easy comparison
- geom_rect(
-   data = published_points,
-   aes(xmin = -Inf, xmax = Inf,
-       ymin = min(phi), ymax = max(phi)),
-   fill = "grey90", alpha = 0.5
- ) +
-  # Boxplots for the ORPHEUS data
-  geom_boxplot(
-    data = orpheus_df,
-    aes(x = cell_type, y = phi_hrs, fill = cell_type),
-    width = 0.5,
-    outlier.shape = NA # We will plot the points ourselves
-  ) +
-  # Violin for the ORPHEUS data
-  # geom_violin(
-  #   data = orpheus_df,
-  #   aes(x = cell_type, y = phi_hrs, fill = cell_type)
-  # ) +
-  
-
-  # Individual gene points (jittered) for ORPHEUS data
-  geom_jitter(
-    data = orpheus_df, 
-    aes(x = cell_type, y = phi_hrs), 
-    alpha = 0.7,
-    position = position_jitter(width = jitter_width, seed = jitter_seed)
-  ) +
-  
-  # # The published data point estimate with error bars
-  # geom_pointrange(
-  #   data = published_summary,
-  #   aes(x = cell_type, y = mean_phi, ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
-  #   size = 1, 
-  #   fatten = 3, # Makes the point larger
-  #   color = "black",
-  #   shape = 18 # A diamond shape to distinguish it
-  # ) +
-    # The published data point estimates
-  geom_point(
-    data = published_points,
-    aes(x = cell_type, y = phi),
-    alpha = 0.7,
-    color = "black",
-  ) +
-  
-  # The Gene Labels (using ggrepel)
-  #geom_text_repel(
-  #  data = orpheus_df,
-  #  aes(x = cell_type, y = phi_hrs, label = gene_label),
-  #  position = position_jitter(width = jitter_width, seed = jitter_seed),
-  #  box.padding = 0.5,         # More space around labels
-  #  point.padding = 0.5,       # Space from the point
-  #  min.segment.length = 0,    # Draw lines even for close labels
-  #  max.overlaps = Inf,        # Ensure all labels are shown
-  #  fontface = "italic",       # Italicize gene names
-  #  size = 4,
-  #) +
-  
-  # Aesthetics and Labels
-  scale_fill_manual(values = c("SCN Vip+/Nms+\nneurons" = "#018571", "SCN Cck+/Bdnf+\nneurons" = "#dfc27d", "SCN Cck+/C1ql3+\nneurons" ="#80cdc1", "SCN Vip+/Grp+\nneurons" = "#a6611a", "SCN Avp+/Nms+\nneurons")) +
-  labs(
-    title = "ORPHEUS Quantifies Cell-Type-Specific Synchrony in the SCN",
-    subtitle = "Phase dispersion estimates are consistent with experimental data from PER2::luc assays",
-    x = "", # No x-axis label needed
-    y = "Phase dispersion (hrs)"
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "none", # The x-axis labels are sufficient
-    plot.title = element_text(face = "bold"),
-    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12),   # Increase legend title size
-  )
-
-# Display the plot
-print(p)
 ```
 
 ### BooteJTK on combat data
@@ -1628,99 +515,7 @@ for(cell_type in c("avp/nms", "cck/c1ql3", "vip/grp","vip/nms" )){
 }
 ```
 
-How does Bootejtk compare to JTK?
-
-```{r}
-#Regular JTK
-# cell_type= "vip/nms"
-# 
-# tmp = orpheus_inputs_combat[[cell_type]]
-# pb_mat = tmp[[1]]
-# 
-# #Recover time in hours that sample was collected
-# 
-# matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
-# ZT = as.numeric(matches[,2])
-# print(ZT)
-# pb_mat = pb_mat[-which(rownames(pb_mat) =="Arntl"), ]
-# 
-# run_meta2d(pb_mat, ZT,"~/Desktop/PB_24hr_vipnms_JTK.txt", "~/Desktop/", cycMethod = "JTK" )
-# JTK = read.delim("~/Desktop/JTKresult_PB_24hr_vipnms_JTK.txt")
-# eJTK = read.delim("~/Documents/eJTK/BooteJTK/mouse_SCN_pb/ejtk_pb_results/vipnms_pb_Vash__boot10-rep2_GammaP.txt")
-# 
-# setequal(JTK$CycID, eJTK$ID)
-# 
-# merged = merge(JTK, eJTK, by.x = "CycID", by.y = "ID", suffixes = c("_JTK", "_eJTK"))%>%
-#   mutate(sig_JTK = ifelse(ADJ.P < 0.05, T, F))%>%
-#   mutate(sig_eJTK = ifelse(GammaP < 0.05, T, F))
-# 
-# table(merged$sig_eJTK)
-# table(merged$sig_JTK)
-# table(merged$sig_eJTK, merged$sig_JTK)
-# 
-# plot(merged$AMP, merged$Max_Amp)
-# plot(merged$PhaseMean, merged$LAG)
-
-df = read.delim("~/Documents/eJTK/BooteJTK/test_Bootejtk/simulated_genes_1000genes_14to58hrs.txt", row.names = 1)
-
-ZT = str_remove(colnames(df), "ZT") %>% as.numeric
-
-run_meta2d(df, ZT,"~/Desktop/PB_24hr_simulated_JTK.txt", "~/Desktop/", cycMethod = "JTK" )
-JTK = read.delim("~/Desktop/JTKresult_PB_24hr_simulated_JTK.txt")
-eJTK = read.delim("~/Documents/eJTK/BooteJTK/test_Bootejtk/simulated_genes_1000genes_14to58hrs_Vash__boot10-rep2_GammaP.txt")
-truth = read.delim("~/Documents/eJTK/BooteJTK/test_Bootejtk/simulated_genes_metadata_1000genes_14to58hrs.txt")
-
-setequal(JTK$CycID, eJTK$ID)
-
-merged = merge(JTK, eJTK, by.x = "CycID", by.y = "ID", suffixes = c("_JTK", "_eJTK"))%>%
-  mutate(sig_JTK = ifelse(ADJ.P < 0.05, T, F))%>%
-  mutate(sig_eJTK = ifelse(GammaP < 0.05, T, F))
-
-table(merged$sig_eJTK)
-table(merged$sig_JTK)
-table(merged$sig_eJTK, merged$sig_JTK)
-
-plot(merged$AMP, merged$Max_Amp)
-plot(merged$PhaseMean, merged$LAG)
-
-setequal(merged$CycID, truth$GeneID)
-
-merged2 = merge(merged, truth, by.x = "CycID", by.y = "GeneID", suffixes = c("", "_true"))
-table(merged2$sig_eJTK, merged2$Rhythmic)
-table(merged2$sig_JTK, merged2$Rhythmic)
-plot(merged2$PhaseMean, merged2$Acrophase)
-plot(merged2$LAG, merged2$Acrophase)
-
-plot(merged2$Max_Amp/2, merged2$Amplitude)
-plot(merged2$AMP, merged2$Amplitude)
-#Lesson:, bc ZTs start at ZT14, the LAG returned by regular JTK will be 14 hours off. eJTK phaseMEAN is ready to use as reported.
-```
-
-### Compare pb acrophases to 12hr var acrophases when acrophases are not contrained (in the regression step for preparing the variance or in the eJTK steps where phases are supplied)
-
-```{r}
-
-plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
-  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_pb/ejtk_pb_results/",cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
-  # var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_var_nov26/", cell_type, "_double_freq_mat_free_Vash__boot10-rep4_GammaP.txt")
-    var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_var/", cell_type, "_double_freq_mat_residual_Vash__boot10-rep4_GammaP.txt")
-
-  pb_jtk_res = read.delim(pb_path, sep = "\t")
-  var_jtk_res = read.delim(var_path, sep = "\t")
-
-  merged_res = merge(pb_jtk_res, var_jtk_res, by = "ID", suffixes = c("_pb", "_var"))
-
-  merged_filt = dplyr::filter(merged_res, GammaP_var < var_sig) %>% mutate(acrodiff = (PhaseMean_var - PhaseMean_pb) %% 12)
-
- hist(merged_filt$acrodiff, main = cell_type, breaks = seq(0, 12, by = 2))
-}
-
-sapply(c("avpnms", "vipgrp", "vipnms", "cckc1ql3"), plot_free_acrodiff_ejtk, var_sig = 0.1)
-```
-
-#### Do above in slightly different way
-
-Use the "all phase targeted results" this is where we searched for 12-hr rhythms of any phase. In practice, the difference between this and above was that this method necessitates using the -B flag for BootEJTK
+### Compare pb acrophases to 12hr var acrophases
 
 ```{r}
 plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
@@ -1735,6 +530,37 @@ plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
   merged_filt = dplyr::filter(merged_res, Pvalue < var_sig) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
 
  hist(merged_filt$acrodiff, main = cell_type, breaks = seq(0, 12, by = 2))
+ fill_col <- switch(
+  cell_type,
+  "avpnms" = "#F8766D",
+  "vipgrp" = "#a6611a",
+  "vipnms" = "#018571",
+  "cckc1ql3" = "#80cdc1"
+)
+ 
+acrodiff_compare = ggplot(merged_filt, aes(x = acrodiff)) +
+  geom_histogram(binwidth = 2, color = "black", alpha = 1,  breaks = seq(0, 12, by = 2), fill = fill_col) +
+  guides(fill = "none") +    # remove fill legend
+  xlab("abs(24hr PB acro - 12hr Var acro)(hrs)")+
+  ylab("Count")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+
+   # Use scale_x_continuous for precise control over the x-axis
+  scale_x_continuous(
+    limits = c(0, 12),
+    breaks = seq(0, 12, by = 3)
+  )+ggtitle(cell_type)
+
+show(acrodiff_compare)
+ggsave(paste0("~/Desktop/mouse_SCN_acrodiff_plots/", cell_type, "_acrodiff.pdf"), plot = acrodiff_compare, width = 5, height = 3)
 }
 
 cell_types = c("avpnms", "vipgrp", "vipnms", "cckc1ql3")
@@ -1749,6 +575,13 @@ sapply(cell_types, plot_free_acrodiff_ejtk, var_sig = 0.05)
 Given significant cyclers from Bootejtk on pseudobulk, and targeted 12-hr rhythms in variance, rerun my regression, ignoring any significance cutoffs from regression.
 
 ```{r}
+library(tidyverse)
+library(Orpheus)
+
+#Load seurat object with combated assay:
+load("../examples_fixed_acrophase/figures/mouse_SCN/mouse_SCN_neuronSubset_seurat_obj_w_combat_assay.RData")
+
+orpheus_inputs_combat = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("avp/nms","cck/bdnf","cck/c1ql3","vip/grp", "vip/nms"), grouping_var = "neuron_subcluster", assay_to_use = "ORPHEUS_norm_ComBat" )
 
 # var_p_value = 0.1
 var_p_value = 0.05
@@ -1756,10 +589,10 @@ cluster_phis = list()
 for(cell_type in c("avp/nms","cck/c1ql3", "vip/grp","vip/nms")){
 cell_type_str = str_remove(cell_type, "/")
 message("Looking at celltype: ", cell_type_str)
-var_path = paste0("~/Documents/eJTK/BooteJTK/", cell_type_str, "_targeted_results_fixedAcroRegression_2hr_width.txt")
+var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/", cell_type_str, "_targeted_results_fixedAcroRegression_2hr_width.txt")
 message("12hr rhtyhms from ", var_path)
 SCN_var = read.delim(var_path)
-pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_pb/ejtk_pb_results/", cell_type_str, "_pb_Vash__boot10-rep2_GammaP.txt")
+pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_pb/ejtk_pb_results/", cell_type_str, "_pb_Vash__boot10-rep2_GammaP.txt")
 message("24hr rhythms from ", pb_path)
 SCN_pb = read.delim(pb_path)
 
@@ -1839,8 +672,9 @@ cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_n
   current_df
 }))
 
+load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_varPthr05.RData")
 
-cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
+cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi) & as.numeric(fund_mean_coeff)>0)
 table(cos_phis_tmm_filt$Source)
 
 
@@ -1899,6 +733,8 @@ category_order <- c("SCN Avp+/Nms+\nneurons",
 orpheus_df$cell_type <- factor(orpheus_df$cell_type, levels = category_order)
 published_summary$cell_type <- factor(published_summary$cell_type, levels = category_order)
 
+#Filter cell types we want to show:
+orpheus_df <- filter(orpheus_df, Source %in% c("vipnms", "cckc1ql3"))
 
 # The Plot
 p <- ggplot() +
@@ -1953,7 +789,7 @@ p <- ggplot() +
     data = published_points,
     aes(x = cell_type, y = phi),
     alpha = 0.7,
-    color = "black",
+    color = "red",
   ) +
   
   # The Gene Labels (using ggrepel)
@@ -2001,912 +837,139 @@ p <- p+geom_text(
   size = 3)
 # Display the plot
 print(p)
-
+ggsave("~/Desktop/BOXPLOT_COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_varPthr05.pdf", plot = p, width = 7, height = 5)
 ```
 
-### ORPHEUS on genes provided by BootEJTK: smaller width
-
-Here I use 12 rhythms in variance, targeted, but this time only the expected phase +-1 are targeted, as opposed to phase +-2 (above).
+#### Plot example gene traces
 
 ```{r}
+library(doParallel)
+plot_rhythms <- function(cell_type, times, var_mat, mean_mat, plot_me = c(), time_units = "hrs", line_thickness = 1, point_size = 3, line_color = "red", point_color = "blue") {
+  gene1 <- t(var_mat)  # get the transpose, subjects x genes and put in order of CYCLOPS order
+  means1 <- t(mean_mat)
+  
+  if (time_units == "hrs") {
+    cat(paste("\nRunning regression, converting hours to radians"))
+    times1 <- times / 12 * pi
+  } else {
+    cat(paste("\nRunning regression assuming times are 0-2pi radians"))
+    times1 <- times
+  }
+  times1_hrs = (times1 * 12 / pi) 
+  
+  # Subset to selected genes, ensuring matrices remain matrices
+  gene1 <- gene1[, colnames(gene1) %in% plot_me, drop = FALSE]
+  means1 <- means1[, colnames(means1) %in% plot_me, drop = FALSE]
 
-var_p_value = 0.1
-cluster_phis = list()
-for(cell_type in c("avp/nms","cck/c1ql3", "vip/grp","vip/nms")){
-cell_type_str = str_remove(cell_type, "/")
-message("Looking at celltype: ", cell_type_str)
-var_path = paste0("~/Documents/eJTK/BooteJTK/", cell_type_str, "_targeted_results_fixedAcroRegression_1hr_width.txt")
-message("12hr rhtyhms from ", var_path)
-SCN_var = read.delim(var_path)
-pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_pb/ejtk_pb_results/", cell_type_str, "_pb_Vash__boot10-rep2_GammaP.txt")
-message("24hr rhythms from ", pb_path)
-SCN_pb = read.delim(pb_path)
+  # Loop through genes
+  foreach(gene_i = 1:ncol(gene1), .combine = rbind) %do% {
+    gexp1 <- as.numeric(unlist(gene1[, gene_i]))
+    m1 <- as.numeric(unlist(means1[, gene_i]))
+    Gene_Symbols <- colnames(gene1)[gene_i]
+    pb_model_partial = lm(m1~ 1)
+    pb_model <- lm(m1 ~ sin(times1) + cos(times1))
+    pb_anova_results = anova(pb_model_partial, pb_model)
+    pb_acro = atan2(pb_model[["coefficients"]][["sin(times1)"]], pb_model[["coefficients"]][["cos(times1)"]]) %% (2*pi)
+    pb_acro_hrs = pb_acro * 12 / pi
+    pb_amp = sqrt(pb_model[["coefficients"]][["sin(times1)"]]^2 + pb_model[["coefficients"]][["cos(times1)"]]^2)
+    pb_intercept = pb_model[['coefficients']]["(Intercept)"]
 
-merged_res = merge(SCN_var, SCN_pb, by.x = "Gene", by.y = "ID", suffixes = c("_var", "_pb")) %>% filter(Pvalue < var_p_value & GammaP < 0.05) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
+    var_partial <- lm(gexp1 ~ 1)
+    var_model <- lm(gexp1 ~ sin(2 * times1) + cos(2 * times1) )
+    var_anova_results = anova(var_partial, var_model)
+    sin_coeff = var_model[["coefficients"]][["sin(2 * times1)"]]
+    cos_coeff = var_model[["coefficients"]][["cos(2 * times1)"]]
+    double_freq_acrophase = atan2(sin_coeff, cos_coeff) %% (2*pi) / 2
+    double_freq_acrophase_hrs = double_freq_acrophase * 12 / pi
+    var_double_freq_amp = sqrt(sin_coeff^2 + cos_coeff^2)
 
-ejtk_sig_genes = merged_res$Gene %>% unname %>% unlist
+    my_theme <- theme_bw()+
+      theme(
+        axis.text.x = element_text(size = 14),#  x-axis text size
+        axis.text.y = element_text(size = 14),#  y-axis text size
+        axis.title.x = element_text(size = 16),#  x-axis title size
+        axis.title.y = element_text(size = 16),#  y-axis title size
+        legend.title = element_text(size = 12), # legend title size
+        strip.text = element_text(size = 12)
+      )
 
-tmp = orpheus_inputs_combat[[cell_type]]
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
-counts = tmp[[3]]
+   # Data for plot 1 
+    pb_data <- data.frame(times1_hrs = times1_hrs, m1 = m1) 
+    times_ideal <- seq(0, round(max(times1_hrs)), by = 0.1)
+    pb_ideal_data <- data.frame(times_ideal = times_ideal, 
+                            pb_ideal = pb_amp * cos((times_ideal - pb_acro_hrs)*(pi/12)) + pb_intercept) 
 
+    # Create the ggplot object 
+    p1 <- ggplot(pb_data, aes(x = times1_hrs, y = m1)) + 
+    geom_point(color = point_color, size = point_size) + 
+    geom_line(data = pb_ideal_data, aes(x = times_ideal, y = pb_ideal), color = line_color, linewidth = line_thickness) + 
+    labs(title = paste(cell_type, "PB", Gene_Symbols), 
+          subtitle = paste("p-value:", round(pb_anova_results$`Pr(>F)`[2], 3), 
+                          ", acrophase:", round(pb_acro_hrs, 3)), 
+          x = "Time (hrs)", 
+          y = "Bulk expression")+
+    my_theme
 
-#Recover time in hours that sample was collected
+    # Data for plot 2 
+    var_data <- data.frame(times1_hrs = times1_hrs, circ = gexp1) 
+    var_ideal_data <- data.frame(times_ideal = times_ideal, 
+                              var_ideal = var_double_freq_amp * cos(2 *(pi/12)*(times_ideal - double_freq_acrophase_hrs))) 
 
-matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
-ZT = as.numeric(matches[,2])
-# print(ZT)
+    # Create the ggplot object 
+    p2 <- ggplot(var_data, aes(x = times1_hrs, y = circ)) + 
+    geom_point(color = point_color, size = point_size) + 
+    geom_line(data = var_ideal_data, aes(x = times_ideal, y = var_ideal), color = line_color, linewidth = line_thickness) + 
+    labs(title = paste(cell_type, "12hr comp.", Gene_Symbols), 
+    subtitle = paste("p-value:", round(var_anova_results$`Pr(>F)`[2], 3), ", acrophase:", round(double_freq_acrophase_hrs, 3)), x = "Time (hrs)", 
+y = "12-hr component of var.")+
+    my_theme
+    show(p1+p2)
+    combined_plot <- p1 + p2
+    ggsave(paste0("~/Desktop/mouse_SCN_gene_traces/", cell_type,"_", Gene_Symbols,".pdf"), combined_plot, width = 7, height = 5)
 
-
-pb_cycling = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
-
-
-phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
-var_mat = var_mat[phase_pb$Gene_Symbols,]
-pb_mat = pb_mat[phase_pb$Gene_Symbols,]
-stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
-stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
-phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
-#hist(as.numeric(phase_pb))
-var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-
-bulk_amp_thr = 0.05
-
-input_cos = var_cyclers %>%
-    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    # filter(p_statistic < 0.05) %>%
-    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
-    filter(amplitude_bulk >= bulk_amp_thr) %>%
-    filter(Gene_Symbols %in% ejtk_sig_genes) %>%
-    column_to_rownames("Gene_Symbols")
-    # filter(partial_model_AIC_var > full_model_AIC_var)
-
- # Calculate phi parameters
-phi = input_cos %>%
-        apply(., 1, function(row) {
-            suppressWarnings(
-                 find_analytic(row[1], row[2], row[3], row[4])
-                 )
-        }) %>%
-        t %>%
-        as.data.frame
-
-colnames(phi) = c("G", "Ac", "theta", "phi")
-output = merge(phi, input_cos, by = 0)
-
-local_res =  list("tmm" = output)
-names(local_res) =cell_type_str
-cluster_phis <- append(cluster_phis, list(local_res))
-
-
-# cosine_vs_jtk = merge(vipgrp, input_cos, by.x = "Gene", by.y = 0)
-# plot(cosine_vs_jtk$PhaseMean, cosine_vs_jtk$acrophase_bulk*12/pi)
-# lines(c(0,100), c(0,100))
-# plot(cosine_vs_jtk$PhaseMean12, cosine_vs_jtk$acrophase_bulk)
-# lines(c(0,100), c(0,100))
-# plot(cosine_vs_jtk$Max_Amp_pb/2, cosine_vs_jtk$amplitude_bulk)
-# lines(c(0,100), c(0,100))
-# plot(cosine_vs_jtk$Max_Amp_var/2, abs(cosine_vs_jtk$double_freq_amplitude))
-# lines(c(0,100), c(0,100))
+    }
 }
-cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-  current_df <- cluster_phis[[source_name]][[1]]
-  current_df$Source <- names(cluster_phis[[source_name]][1])
-  current_df
-}))
+
+cell_types = c("avpnms", "vipgrp", "vipnms", "cckc1ql3")
 
 
-cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
-table(cos_phis_tmm_filt$Source)
-
-
-save(cos_phis_tmm, file = "./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_narrower1hrWidth.RData")
-
-library(ggplot2)
-library(ggrepel) # For non-overlapping text labels
-orpheus_df = cos_phis_tmm_filt
-jitter_width <- 0.15
-jitter_seed <- 123 # A specific seed for reproducibility
-
-
-# List of core clock genes
-clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2", "HLF", "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
-
-# Combine into a single, long-format data frame
-# orpheus_df <- filter(cos_phis_tmm_filt, Source != "avp/nms")
-orpheus_df$cell_type <- case_when(
-    orpheus_df$Source == "cckbdnf" ~ "SCN Cck+/Bdnf+\nneurons",
-    orpheus_df$Source == "vipnms" ~ "SCN Vip+/Nms+\nneurons",
-    orpheus_df$Source == "cckc1ql3" ~ "SCN Cck+/C1ql3+\nneurons",
-    orpheus_df$Source == "vipgrp" ~ "SCN Vip+/Grp+\nneurons",
-    orpheus_df$Source == "avpnms" ~ "SCN Avp+/Nms+\nneurons",
-    TRUE ~ NA
-  )
-
-# Add a column for labeling ONLY the clock genes
-orpheus_df$gene_label <- ifelse(toupper(orpheus_df$Row.names) %in% clock_genes, orpheus_df$Row.names, NA)
-orpheus_df$phi_hrs = orpheus_df$phi *12 / pi
-
-#Published Data
-published_phis <- c(1.3235566 ,3.4047716, 0.5998745)
-published_summary <- data.frame(
-  # Use a clear name for the x-axis category
-  cell_type = factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
-  mean_phi = mean(published_phis),
-  sd_phi = sd(published_phis)
-)
-published_points <- data.frame(
-  cell_type =  factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
-  phi = c(1.3235566 ,3.4047716, 0.5998745)
-)
-
-
-# Set the order of the categories on the x-axis
-category_order <- c("SCN Avp+/Nms+\nneurons",
-                    "SCN Vip+/Nms+\nneurons", "SCN Vip+/Grp+\nneurons",
-                    "SCN Cck+/Bdnf+\nneurons","SCN Cck+/C1ql3+\nneurons",
-                    "Published PER2::luc Assay\n(Shan et al. 2020)")
-orpheus_df$cell_type <- factor(orpheus_df$cell_type, levels = category_order)
-published_summary$cell_type <- factor(published_summary$cell_type, levels = category_order)
-
-
-# The Plot
-p <- ggplot() +
-  
-  # # Shaded region for the published data range for easy comparison
-  # geom_rect(
-  #   data = published_summary,
-  #   aes(xmin = -Inf, xmax = Inf, 
-  #       ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
-  #   fill = "grey90", alpha = 0.5
-  # ) +
- # Shaded region for the published data range for easy comparison
- geom_rect(
-   data = published_points,
-   aes(xmin = -Inf, xmax = Inf,
-       ymin = min(phi), ymax = max(phi)),
-   fill = "grey90", alpha = 0.5
- ) +
-  # Boxplots for the ORPHEUS data
-  geom_boxplot(
-    data = orpheus_df,
-    aes(x = cell_type, y = phi_hrs, fill = cell_type),
-    width = 0.5,
-    outlier.shape = NA # We will plot the points ourselves
-  ) +
-  # Violin for the ORPHEUS data
-  # geom_violin(
-  #   data = orpheus_df,
-  #   aes(x = cell_type, y = phi_hrs, fill = cell_type)
-  # ) +
-  
-
-  # Individual gene points (jittered) for ORPHEUS data
-  geom_jitter(
-    data = orpheus_df, 
-    aes(x = cell_type, y = phi_hrs), 
-    alpha = 0.7,
-    position = position_jitter(width = jitter_width, seed = jitter_seed)
-  ) +
-  
-  # # The published data point estimate with error bars
-  # geom_pointrange(
-  #   data = published_summary,
-  #   aes(x = cell_type, y = mean_phi, ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
-  #   size = 1, 
-  #   fatten = 3, # Makes the point larger
-  #   color = "black",
-  #   shape = 18 # A diamond shape to distinguish it
-  # ) +
-    # The published data point estimates
-  geom_point(
-    data = published_points,
-    aes(x = cell_type, y = phi),
-    alpha = 0.7,
-    color = "black",
-  ) +
-  
-  # The Gene Labels (using ggrepel)
-  #geom_text_repel(
-  #  data = orpheus_df,
-  #  aes(x = cell_type, y = phi_hrs, label = gene_label),
-  #  position = position_jitter(width = jitter_width, seed = jitter_seed),
-  #  box.padding = 0.5,         # More space around labels
-  #  point.padding = 0.5,       # Space from the point
-  #  min.segment.length = 0,    # Draw lines even for close labels
-  #  max.overlaps = Inf,        # Ensure all labels are shown
-  #  fontface = "italic",       # Italicize gene names
-  #  size = 4,
-  #) +
-  
-  # Aesthetics and Labels
-  scale_fill_manual(values = c("SCN Vip+/Nms+\nneurons" = "#018571", "SCN Cck+/Bdnf+\nneurons" = "#dfc27d", "SCN Cck+/C1ql3+\nneurons" ="#80cdc1", "SCN Vip+/Grp+\nneurons" = "#a6611a", "SCN Avp+/Nms+\nneurons")) +
-  labs(
-    title = "ORPHEUS Quantifies Cell-Type-Specific Synchrony in the SCN",
-    subtitle = "Phase dispersion estimates are consistent with experimental data from PER2::luc assays",
-    x = "", # No x-axis label needed
-    y = "Phase dispersion (hrs)"
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "none", # The x-axis labels are sufficient
-    plot.title = element_text(face = "bold"),
-    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12),   # Increase legend title size
-  )
-
-# Display the plot
-print(p)
-
-
-```
-
-What are the differences between using the wide and narrow targeted range for Bootejtk on 12hr rhythms?
-
-```{r}
-load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression.RData")
-wide = cos_phis_tmm
-load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_narrower1hrWidth.RData")
-narrow = cos_phis_tmm
-narrow_filt = filter(narrow, !is.na(phi))
-wide_filt = filter(wide, !is.na(phi))
-
-merged_intersect = merge(narrow_filt, wide_filt, by = "Row.names", suffixes = c("_1hr", "_2hr"))
-
-all.equal(merged_intersect$G_1hr, merged_intersect$G_2hr)
-all.equal(merged_intersect$phi, merged_intersect$phi)
-
-library(ggvenn)
-set_A <- narrow$Row.names
-set_B <- wide$Row.names
-
-x <- list("1hr width" = set_A, "2hr width" = set_B)
-
-# Create the Venn diagram
-ggvenn(x)
-
-set_A <- narrow_filt$Row.names
-set_B <- wide_filt$Row.names
-
-x <- list("1hr width real phi" = set_A, "2hr width real phi" = set_B)
-
-# Create the Venn diagram
-ggvenn(x)
-
-```
-
-### ORHPEUS on genes provided by BootEJTK: y \~ pb residuals
-
-This means when I am preparing my variance data for Bootejtk, I fit the data with y \~ pb, then return the residuals of that model for BootEJTK.
-
-```{r}
-# var_p_value = 0.1
 var_p_value = 0.05
-cluster_phis = list()
-for(cell_type in c("avp/nms","cck/c1ql3", "vip/grp","vip/nms")){
-cell_type_str = str_remove(cell_type, "/")
-message("Looking at celltype: ", cell_type_str)
-var_path = paste0("~/Documents/eJTK/BooteJTK/", cell_type_str, "_targeted_results_ResidualAcroRegression_2hr_width.txt")
-message("12hr rhtyhms from ", var_path)
-SCN_var = read.delim(var_path)
-pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_pb/ejtk_pb_results/", cell_type_str, "_pb_Vash__boot10-rep2_GammaP.txt")
-message("24hr rhythms from ", pb_path)
-SCN_pb = read.delim(pb_path)
-
-merged_res = merge(SCN_var, SCN_pb, by.x = "Gene", by.y = "ID", suffixes = c("_var", "_pb")) %>% filter(Pvalue < var_p_value & GammaP < 0.05) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
-
-ejtk_sig_genes = merged_res$Gene %>% unname %>% unlist
-
-tmp = orpheus_inputs_combat[[cell_type]]
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
-counts = tmp[[3]]
 
 
-#Recover time in hours that sample was collected
-
-matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
-ZT = as.numeric(matches[,2])
-# print(ZT)
-
-
-pb_cycling = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
-
-
-phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
-var_mat = var_mat[phase_pb$Gene_Symbols,]
-pb_mat = pb_mat[phase_pb$Gene_Symbols,]
-stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
-stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
-phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
-#hist(as.numeric(phase_pb))
-var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-
-bulk_amp_thr = 0.05
-
-input_cos = var_cyclers %>%
-    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    # filter(p_statistic < 0.05) %>%
-    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
-    filter(amplitude_bulk >= bulk_amp_thr) %>%
-    filter(Gene_Symbols %in% ejtk_sig_genes) %>%
-    column_to_rownames("Gene_Symbols")
-    # filter(partial_model_AIC_var > full_model_AIC_var)
-
- # Calculate phi parameters
-phi = input_cos %>%
-        apply(., 1, function(row) {
-            suppressWarnings(
-                 find_analytic(row[1], row[2], row[3], row[4])
-                 )
-        }) %>%
-        t %>%
-        as.data.frame
-
-colnames(phi) = c("G", "Ac", "theta", "phi")
-output = merge(phi, input_cos, by = 0)
-
-local_res =  list("tmm" = output)
-names(local_res) =cell_type_str
-cluster_phis <- append(cluster_phis, list(local_res))
-
-
-# cosine_vs_jtk = merge(vipgrp, input_cos, by.x = "Gene", by.y = 0)
-# plot(cosine_vs_jtk$PhaseMean, cosine_vs_jtk$acrophase_bulk*12/pi)
-# lines(c(0,100), c(0,100))
-# plot(cosine_vs_jtk$PhaseMean12, cosine_vs_jtk$acrophase_bulk)
-# lines(c(0,100), c(0,100))
-# plot(cosine_vs_jtk$Max_Amp_pb/2, cosine_vs_jtk$amplitude_bulk)
-# lines(c(0,100), c(0,100))
-# plot(cosine_vs_jtk$Max_Amp_var/2, abs(cosine_vs_jtk$double_freq_amplitude))
-# lines(c(0,100), c(0,100))
-}
-cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-  current_df <- cluster_phis[[source_name]][[1]]
-  current_df$Source <- names(cluster_phis[[source_name]][1])
-  current_df
-}))
-
-
-cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
-table(cos_phis_tmm_filt$Source)
-
-
-# save(cos_phis_tmm, file = "./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_2hrWidth_RonResidualsMethod_varPthr05.RData")
-
-library(ggplot2)
-library(ggrepel) # For non-overlapping text labels
-orpheus_df = cos_phis_tmm_filt
-jitter_width <- 0.15
-jitter_seed <- 123 # A specific seed for reproducibility
-
-
-# List of core clock genes
-clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2", "HLF", "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
-
-# Combine into a single, long-format data frame
-# orpheus_df <- filter(cos_phis_tmm_filt, Source != "avp/nms")
-orpheus_df$cell_type <- case_when(
-    orpheus_df$Source == "cckbdnf" ~ "SCN Cck+/Bdnf+\nneurons",
-    orpheus_df$Source == "vipnms" ~ "SCN Vip+/Nms+\nneurons",
-    orpheus_df$Source == "cckc1ql3" ~ "SCN Cck+/C1ql3+\nneurons",
-    orpheus_df$Source == "vipgrp" ~ "SCN Vip+/Grp+\nneurons",
-    orpheus_df$Source == "avpnms" ~ "SCN Avp+/Nms+\nneurons",
-    TRUE ~ NA
-  )
-
-# Add a column for labeling ONLY the clock genes
-orpheus_df$gene_label <- ifelse(toupper(orpheus_df$Row.names) %in% clock_genes, orpheus_df$Row.names, NA)
-orpheus_df$phi_hrs = orpheus_df$phi *12 / pi
-
-#Published Data
-published_phis <- c(1.3235566 ,3.4047716, 0.5998745)
-published_summary <- data.frame(
-  # Use a clear name for the x-axis category
-  cell_type = factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
-  mean_phi = mean(published_phis),
-  sd_phi = sd(published_phis)
-)
-published_points <- data.frame(
-  cell_type =  factor("Published PER2::luc Assay\n(Shan et al. 2020)"),
-  phi = c(1.3235566 ,3.4047716, 0.5998745)
-)
-
-
-# Set the order of the categories on the x-axis
-category_order <- c("SCN Avp+/Nms+\nneurons",
-                    "SCN Vip+/Nms+\nneurons", "SCN Vip+/Grp+\nneurons",
-                    "SCN Cck+/Bdnf+\nneurons","SCN Cck+/C1ql3+\nneurons",
-                    "Published PER2::luc Assay\n(Shan et al. 2020)")
-orpheus_df$cell_type <- factor(orpheus_df$cell_type, levels = category_order)
-published_summary$cell_type <- factor(published_summary$cell_type, levels = category_order)
-
-
-# The Plot
-p <- ggplot() +
+for(cell_type in cell_types){
   
-  # # Shaded region for the published data range for easy comparison
-  # geom_rect(
-  #   data = published_summary,
-  #   aes(xmin = -Inf, xmax = Inf, 
-  #       ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
-  #   fill = "grey90", alpha = 0.5
-  # ) +
- # Shaded region for the published data range for easy comparison
- geom_rect(
-   data = published_points,
-   aes(xmin = -Inf, xmax = Inf,
-       ymin = min(phi), ymax = max(phi)),
-   fill = "grey90", alpha = 0.5
- ) +
-  # Boxplots for the ORPHEUS data
-  geom_boxplot(
-    data = orpheus_df,
-    aes(x = cell_type, y = phi_hrs, fill = cell_type),
-    width = 0.5,
-    outlier.shape = NA # We will plot the points ourselves
-  ) +
-  # Violin for the ORPHEUS data
-  # geom_violin(
-  #   data = orpheus_df,
-  #   aes(x = cell_type, y = phi_hrs, fill = cell_type)
-  # ) +
+  var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/SCN_targeted12rhythms_fixedAcroRegression_AllhrWidth/", cell_type, "_targeted_results_FixedAcroRegression_ALLhr_width.txt")
+  bejtk_var_res = read.delim(var_path)
+  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_pb/ejtk_pb_results/", cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
+  bejtk_pb_res = read.delim(pb_path)
   
-
-  # Individual gene points (jittered) for ORPHEUS data
-  geom_jitter(
-    data = orpheus_df, 
-    aes(x = cell_type, y = phi_hrs), 
-    alpha = 0.7,
-    position = position_jitter(width = jitter_width, seed = jitter_seed)
-  ) +
+  merged_res = merge(bejtk_var_res, bejtk_pb_res, by.x = "Gene", by.y = "ID", suffixes = c("_var", "_pb")) %>% filter(Pvalue < var_p_value & GammaP < 0.05) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
+  merged_res$Source = cell_type
   
-  # # The published data point estimate with error bars
-  # geom_pointrange(
-  #   data = published_summary,
-  #   aes(x = cell_type, y = mean_phi, ymin = mean_phi - sd_phi, ymax = mean_phi + sd_phi),
-  #   size = 1, 
-  #   fatten = 3, # Makes the point larger
-  #   color = "black",
-  #   shape = 18 # A diamond shape to distinguish it
-  # ) +
-    # The published data point estimates
-  geom_point(
-    data = published_points,
-    aes(x = cell_type, y = phi),
-    alpha = 0.7,
-    color = "black",
-  ) +
   
-  # The Gene Labels (using ggrepel)
-  #geom_text_repel(
-  #  data = orpheus_df,
-  #  aes(x = cell_type, y = phi_hrs, label = gene_label),
-  #  position = position_jitter(width = jitter_width, seed = jitter_seed),
-  #  box.padding = 0.5,         # More space around labels
-  #  point.padding = 0.5,       # Space from the point
-  #  min.segment.length = 0,    # Draw lines even for close labels
-  #  max.overlaps = Inf,        # Ensure all labels are shown
-  #  fontface = "italic",       # Italicize gene names
-  #  size = 4,
-  #) +
   
-  # Aesthetics and Labels
-  scale_fill_manual(values = c("SCN Vip+/Nms+\nneurons" = "#018571", "SCN Cck+/Bdnf+\nneurons" = "#dfc27d", "SCN Cck+/C1ql3+\nneurons" ="#80cdc1", "SCN Vip+/Grp+\nneurons" = "#a6611a", "SCN Avp+/Nms+\nneurons")) +
-  labs(
-    title = "ORPHEUS Quantifies Cell-Type-Specific Synchrony in the SCN",
-    subtitle = "Phase dispersion estimates are consistent with experimental data from PER2::luc assays",
-    x = "", # No x-axis label needed
-    y = "Phase dispersion (hrs)"
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "none", # The x-axis labels are sufficient
-    plot.title = element_text(face = "bold"),
-    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
-    axis.text.y = element_text(size = 14),    # Increase y-axis text size
-    axis.title.x = element_text(size = 16),   # Increase x-axis title size
-    axis.title.y = element_text(size = 16),   # Increase y-axis title size
-    legend.title = element_text(size = 12),   # Increase legend title size
-  )+ 
-    scale_y_continuous(breaks = c(0,2,4,6,8))
+plot_me = merged_res %>% arrange(as.numeric(Pvalue)) %>% select(Gene) %>% slice(1:3) %>% unname %>% unlist
+  
+  
+pb_data_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_pb/", cell_type, "_pb.txt")
+pb_data = read.delim(pb_data_path, row.names = 1)
 
+var_data_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN/mouse_SCN_var_nov26/", cell_type, "_double_freq_mat_fixed.txt") 
+var_data = read.delim(var_data_path, row.names = 1)
+  
+ZT = str_remove(colnames(pb_data), "ZT") %>% as.numeric()
 
-median_df <- orpheus_df %>%
-  dplyr::group_by(cell_type) %>%
-  dplyr::summarise(median_phi = median(phi_hrs, na.rm = TRUE))
-
-
-p <- p+geom_text(
-  data = median_df,
-  aes(x = cell_type, y = median_phi, label = round(median_phi, 2)),
-  vjust = 1.5,
-  fontface ="bold",
-  size = 3)
-
-# Display the plot
-print(p)
-
-```
-
-What are the differences in phi estimates between using this way and the other 2hr width results?
-
-```{r}
-load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression.RData")
-free = cos_phis_tmm
-load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_2hrWidth_RonResidualsMethod.RData")
-residuals = cos_phis_tmm
-residuals_filt = filter(residuals, !is.na(phi))
-free_filt = filter(free, !is.na(phi))
-
-merged_intersect = merge(residuals_filt, free_filt, by = "Row.names", suffixes = c("_1hr", "_2hr"))
-
-all.equal(merged_intersect$G_1hr, merged_intersect$G_2hr)
-all.equal(merged_intersect$phi, merged_intersect$phi)
-
-library(ggvenn)
-set_A <- residuals$Row.names
-set_B <- free$Row.names
-
-x <- list("y ~pb residuals" = set_A, "free " = set_B)
-
-# Create the Venn diagram
-ggvenn(x)
-
-set_A <- residuals_filt$Row.names
-set_B <- free_filt$Row.names
-
-x <- list("y ~pb residuals real phi" = set_A, "free real phi" = set_B)
-
-# Create the Venn diagram
-ggvenn(x)
-```
-
-\
-What are the gene overlaps between combat-\> regression_w_projection and combat -\> Bootejtk list -\> regression?
-
-```{r}
-load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression.RData")
-ejtk_res = cos_phis_tmm %>% mutate(Source = str_remove(Source, "/")) %>% mutate(gene_cell = paste0(Row.names,"_", Source))
-
-load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_free.RData")
-regression_res = cos_phis_tmm %>% mutate(Source = str_remove(Source, "/")) %>% mutate(gene_cell = paste0(Row.names,"_", Source))
-
-merged_res = merge(ejtk_res, regression_res, by = "gene_cell", suffixes = c("_ejtk", "_reg"), all.x = T, all.y = T)
-
-table(!is.na(merged_res$phi_ejtk), !is.na(merged_res$phi_reg))
-
-ggplot(merged_res, aes(phi_ejtk, phi_reg))+
-  geom_point()+
-   geom_abline(intercept = 0, slope = 1)+
-  geom_text(aes(label = gene_cell), 
-            vjust = -0.5, 
-            hjust = 0.5) 
-```
-
-### OPRHEUS on coarse clusters:
-
-```{r}
-library(sva)
-load("../../Mouse_SCN/mouse_SCN_seurat_obj.RData")
-
-
-s_obj = prepare_seurat_for_orpheus(seurat_obj = joined_seurat_obj, assay = "RNA", min_prop = 0.001 )
-
-log_norm_counts <- log1p(s_obj@assays$ORPHEUS_norm$counts)  # log(1 + x)
-
-batches = s_obj@meta.data$batch
-
-combat_corrected <- ComBat(
-  dat = as.matrix(log_norm_counts),
-  batch = batches,
-  par.prior = TRUE,
-  prior.plots = FALSE
+ZT_modified = (ZT-14) %% 24
+ 
+line_color <- switch(
+  cell_type,
+  "avpnms" = "#F8766D",
+  "vipgrp" = "#a6611a",
+  "vipnms" = "#018571",
+  "cckc1ql3" = "#80cdc1"
 )
-
-combat_corrected_exp <- expm1(combat_corrected)
-
-s_obj[["ORPHEUS_norm_ComBat_logged"]] <- CreateAssayObject(counts = combat_corrected)
-s_obj[["ORPHEUS_norm_ComBat"]] <- CreateAssayObject(counts = combat_corrected_exp)
-
-load("~/Desktop/mouse_SCN_w_combat_assay_all_celltypes.RData")
-orpheus_inputs_combat = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$cluster), grouping_var = "cluster", assay_to_use = "ORPHEUS_norm_ComBat" )
-
-cluster_phis = list()
-
-for( cell_type in names(orpheus_inputs_combat)){
-cell_type_str = str_replace_all(cell_type, "/", "")
-
-tmp = orpheus_inputs_combat[[cell_type]]
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
-counts = tmp[[3]]
-
-
-#Recover time in hours that sample was collected
-
-matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
-ZT = as.numeric(matches[,2])
-print(ZT)
-
-vars = sparseMatrixStats::rowVars(counts)
-means = sparseMatrixStats::rowMeans2(counts)
-agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
-rownames(agg_theta_meas) = rownames(pb_mat)
-times = colnames(orpheus_inputs_combat$`avp/nms`$pseudobulk_tmm_matrix) %>% as.numeric
-
-pb_cycling = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
-
-phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
-var_mat = var_mat[phase_pb$Gene_Symbols,]
-pb_mat = pb_mat[phase_pb$Gene_Symbols,]
-stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
-stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
-phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
-#hist(as.numeric(phase_pb))
-var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-
-bulk_amp_thr = 0.05
-input_cos = var_cyclers %>%
-    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
-    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
-    filter(amplitude_bulk >= bulk_amp_thr) %>%
-    column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC_var > full_model_AIC_var)
-
-phi <- tryCatch(
-  {
-    calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = bulk_amp_thr)
-  },
-  error = function(e) {
-    message("calc_phi failed: ", e$message)
-    return(NA)
-  }
-)
-if(all(is.na(phi))){
- next
-}
-
-output_cos_tmm = merge(phi, input_cos, by = 0)
-output = merge(output_cos_tmm, agg_theta_meas, by.x = "Row.names", by.y = 0)
-
-
-local_res =  list("tmm" = output)
-names(local_res) =cell_type
-cluster_phis <- append(cluster_phis, list(local_res))
-
-
-}
-
-cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-  current_df <- cluster_phis[[source_name]][[1]]
-  current_df$Source <- names(cluster_phis[[source_name]][1])
-  current_df
-}))
-
-# save(cos_phis_tmm, file = "figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis.RData")
-
-cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
-table(cos_phis_tmm_filt$Source)
-```
-
-### Pseudoreplicates on all SCN cells together:
-
-```{r}
-library(sva)
-load("../../Mouse_SCN/mouse_SCN_seurat_obj.RData")
-
-
-s_obj = prepare_seurat_for_orpheus(seurat_obj = joined_seurat_obj, assay = "RNA", min_prop = 0.001 )
-
-log_norm_counts <- log1p(s_obj@assays$ORPHEUS_norm$counts)  # log(1 + x)
-
-batches = s_obj@meta.data$batch
-
-combat_corrected <- ComBat(
-  dat = as.matrix(log_norm_counts),
-  batch = batches,
-  par.prior = TRUE,
-  prior.plots = FALSE
-)
-
-combat_corrected_exp <- expm1(combat_corrected)
-
-s_obj[["ORPHEUS_norm_ComBat_logged"]] <- CreateAssayObject(counts = combat_corrected)
-s_obj[["ORPHEUS_norm_ComBat"]] <- CreateAssayObject(counts = combat_corrected_exp)
-
-seeds <- c(1,2,3,4)
-#Initialize an empty list to store all results
-all_results_combined <- list()
-for(i in seeds){
-  message(paste("--- Running ORPHEUS with seed:", i, "---"))
-    
-    # returns a list like: list('CellTypeA' = ..., 'CellTypeB' = ...)
-    results_one_seed <- calculate_orpheus_inputs(
-      s_obj, 
-      groups_to_analyze = c("Neurons"), 
-      grouping_var = "coarse_clusters", 
-      assay_to_use = "ORPHEUS_norm_ComBat",
-      num_replicates = 2, 
-      random_seed = i
-    )
-    
-    
-    # Modify the names to include the seed identifier
-    # prevents name clashes when we combine the lists.
-    original_names <- names(results_one_seed)
-    new_names <- paste0(original_names, "_seed", i)
-    names(results_one_seed) <- new_names
-    
-    # Append the newly named results to main list
-    all_results_combined <- c(all_results_combined, results_one_seed)
-}
-# Check the names of the final combined list
-print("Names of the final combined list:")
-print(names(all_results_combined))
-
-all_results_combined_sans_counts <- lapply(all_results_combined, function(x) x[-3])
-
-save(all_results_combined_sans_counts, file = "~/Desktop/mouse_Neurons_combinedCells_4_seeds_pb_var_counts_list.RData")
-#######Load results from above #######
-load("./figures/mouse_SCN/mouse_Neurons_combinedCells_4_seeds_pb_var_counts_list.RData")
-
-cluster_phis = list()
-for(cell_type in names(all_results_combined)){
+ 
+plot_rhythms(cell_type, times = ZT_modified, var_mat = var_data, mean_mat = pb_data, plot_me = plot_me, time_units = "hrs", line_color = line_color, point_size = 2, point_color = "black")
   
-print(paste("Analyzing", cell_type))
-
-
-# tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
-tmp = all_results_combined[[cell_type]]
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
-counts = tmp[[3]]
-
-
-vars = sparseMatrixStats::rowVars(counts)
-means = sparseMatrixStats::rowMeans2(counts)
-agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
-rownames(agg_theta_meas) = rownames(pb_mat)
-
-
-#Recover time in hours that sample was collected
-matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
-ZT = as.numeric(matches[,2])
-print(ZT)
-
-#rename cols to use is_cycling_custom
-colnames(pb_mat) = str_replace(colnames(pb_mat), "_rep[1-9]*", "") 
-stopifnot(all.equal(as.numeric(colnames(pb_mat)), ZT))
-
-#Call cosinor regression methods, where phases of variance wave are fixed:
-pb_cycling = is_cycling(ZT, pb_mat, time_units = "hrs")
-# pb_cycling = is_cycling_custom(ZT, pb_mat, meta_data = pseudorep_meta, time_units = "hrs")
-# test = merge(pb_cycling1, pb_cycling, by = "Gene_Symbols", suffixes = c("", "_batch")) %>%   mutate(across(-Gene_Symbols, as.numeric))
-# plot(test$acrophase_bulk, test$acrophase_bulk_batch)
-
-phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
-
-var_mat = var_mat[phase_pb$Gene_Symbols,]
-pb_mat = pb_mat[phase_pb$Gene_Symbols,]
-
-stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
-stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
-
-phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
-#hist(as.numeric(phase_pb))
-
-var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-# var_cyclers = var_cycling(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
-
-bulk_amp_thr = 0.1
-
-input_cos = var_cyclers %>% 
-    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
-    mutate(across(-Gene_Symbols, as.numeric)) %>%
-    filter(p_statistic < 0.05) %>%
-    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
-    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
-    filter(amplitude_bulk >= bulk_amp_thr) %>%
-    column_to_rownames("Gene_Symbols")%>%
-    filter(partial_model_AIC_var > full_model_AIC_var)
-
-phi <- tryCatch(
-  {
-    calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = bulk_amp_thr)
-  },
-  error = function(e) {
-    message("calc_phi failed: ", e$message)
-    return(NA)   
-  }
-)
-if(all(is.na(phi))){
- next
 }
-
-# plot_rhythms(ZT, var_mat, pb_mat, plot_me = c("Akap17b"))
-
-output_cos_tmm = merge(phi, input_cos, by = 0)
-# output = merge(output_cos_tmm, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
-output = merge(output_cos_tmm, agg_theta_meas, by.x = "Row.names", by.y = 0)
-
-
-local_res =  list("tmm" = output)
-names(local_res) =cell_type
-cluster_phis <- append(cluster_phis, list(local_res))
-}
-
-cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
-  current_df <- cluster_phis[[source_name]][[1]]
-  current_df$Source <- names(cluster_phis[[source_name]][1])
-  current_df
-}))
-
-# save(cos_phis_tmm, file = "figures/mouse_SCN/mouse_SCNcombinedCells_4_seeds_phis.RData") 
-```
-
-Test: paper has \~800 cycling genes in AVP scn subtypes...
-
-```{r}
-library(edgeR)
-load("../../Mouse_SCN/mouse_SCN_seurat_obj.RData")
-
-seurat_obj = subset(joined_seurat_obj, subset =neuron_subcluster == "vip/grp")
-
-table(seurat_obj$neuron_subcluster)
-
-summed_cts = AggregateExpression(seurat_obj,
-                           assays = "RNA",
-                           layers = "counts",
-                           group.by = c("orig.ident"))
-summed_cts = summed_cts$RNA
-
-y <- DGEList(counts = summed_cts)
-keep <- filterByExpr(y)
- y <- y[keep, , keep.lib.sizes = FALSE]
-y <- calcNormFactors(y, method = "TMM")
-# Get log-transformed Counts Per Million (logCPM)
-logcpm_pseudobulk <- cpm(y, log = T)
-cpm_pseudobulk <- cpm(y, log = F)
-
-ZT = str_remove(colnames(logcpm_pseudobulk), "g") %>% as.numeric
-
-run_meta2d <- function(df,
-                      timepoints,
-                      out_file,
-                      out_dir,
-                      minper = 24,
-                      maxper = 24,
-                      cycMethod = c("JTK"),
-                      ...){
-  cat("\nIdentifying rhythms using MetaCycle\n")
-
-  # Write data files to text files for MetaCycle
-  df = cbind("Genes"=rownames(df), df)
-  utils::write.table(df, file=out_file,sep="\t", quote=FALSE, row.names=FALSE)
-
-  MetaCycle::meta2d(infile=out_file,
-                    filestyle="txt",
-                    outdir=out_dir,
-                    timepoints=timepoints,
-                    minper = minper, maxper = maxper,
-                    cycMethod = cycMethod,
-                    ...)
-}
-
-run_meta2d(cpm_pseudobulk, ZT, out_file = "test.txt", out_dir = "~/Desktop/", minper = 24, maxper = 24)
-
-plot(ZT, summed_cts["Gm15892", ])
-# pb_var_list = calculate_orpheus_inputs(seurat_obj, groups_to_analyze = c("cck/c1ql3"), grouping_var = "neuron_subcluster", assay_to_use = "RNA")
 ```

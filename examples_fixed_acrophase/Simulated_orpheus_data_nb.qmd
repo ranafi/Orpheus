@@ -17,8 +17,8 @@ library(Orpheus)
 ```{r}
 simulate_scRNAseq_circadian <- function(n = 10000, m = 5000, p_circ = 0.3,n_time_points = 6, 
                                         phi_sd = 0.3, amp_ratio_range = c(.3, 0.75), G_range = c(0.05, 5), epsilon_sd = 0.,
-                                        theta_range = c(0.01,2.5)) { 
-  set.seed(123)
+                                        theta_range = c(0.01,2.5), seed = 123) { 
+  set.seed(seed)
   
   # Time points
   time_points <- seq(0, 2*pi, length.out = n_time_points) # Discrete time points for sampling
@@ -265,7 +265,7 @@ phi_acc_plot = ggplot(df_filt, aes(x = phi_true*12/pi,y =  phi*12/pi))+
   # stat_summary(fun = median, geom = "point", size = 2.5, color = "skyblue")+
   ggtitle("n=5000,m=10000,p_circ=.3,phi_sd=phi_sd,n_time_points=6,\namp_ratio_range=c(.3,0.75),G_range=c(.05,5),epsilon_sd=0.3,theta_range=c(0.01,2.5)")+
   xlab("True phase std. (hrs)")+
-  ylab("Prediceted phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
   theme_bw()+
   theme(
     strip.background = element_blank(),
@@ -548,7 +548,7 @@ phi_acc_plot = ggplot(df_filt_ideal, aes(x = phi_true*12/pi,y =  phi*12/pi))+
   ggtitle("n=5000,m=10000,p_circ=.3,phi_sd=phi_sd,n_time_points=6,\namp_ratio_range=c(.3,0.75),G_range=c(.05,5),epsilon_sd=0.3,theta_range=c(0.01,2.5)")+
   theme_minimal()+
   xlab("True phase std. (hrs)")+
-  ylab("Prediceted phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
   theme_bw()+
   theme(
     strip.background = element_blank(),
@@ -566,4 +566,370 @@ phi_acc_plot = ggplot(df_filt_ideal, aes(x = phi_true*12/pi,y =  phi*12/pi))+
 
 ggsave("~/Desktop/Simulated_phi_acc_idealized.pdf", plot = phi_acc_plot, width = 5, height = 5, units = "in")  
 
+```
+
+## How accurate is the cell-type phi?
+
+### Realistic data: wrap simulation in a for loop and keep track of the median for each cell type
+
+```{r}
+
+trials <- vector("list", 10)
+names(trials) <- paste0("V", seq(1,10))
+for(trial in 1:10){
+message("Trial:", trial)
+output = list()
+for(i in seq(0, 4.5, by = 0.5)){
+  message("Phi true:", i)
+  phi_sd = i/12*pi
+  epsilon_sd = 0.3
+
+  sim <- simulate_scRNAseq_circadian(n = 8000, m = 10000, p_circ = .1, phi_sd = phi_sd, n_time_points = 6,
+                amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1, 1.2), seed = trial)
+  
+  counts <- sim$counts
+  metadata <- sim$cell_metadata
+  gene_info <- sim$gene_parameters
+  
+  seurat_obj <- CreateSeuratObject(counts = counts, meta.data = metadata)
+  seurat_obj$orig.ident = seurat_obj$time_point
+  seurat_obj$seurat_clusters = "0"
+  
+  s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj)
+  orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = "0", grouping_var = "seurat_clusters")
+  
+  tmp = orpheus_inputs[[1]]
+  pb_mat = tmp[[1]]
+  var_mat = tmp[[2]]
+
+  ZT = as.numeric(colnames(pb_mat) )
+  
+  pb_cycling = is_cycling(ZT, pb_mat, time_units = "rad")
+  circ_genes = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
+  circ_genes_phases = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(acrophase_bulk)  %>% unname %>% unlist %>% as.numeric
+  
+ 
+  var_cyclers = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
+  
+  phi = calc_phi( pb_cycling, var_cyclers, bulk_amp_thr = 0 )
+  
+  input = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix= c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+    # filter(keep_acrodiff == TRUE) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, everything()) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    # filter( amplitude_bulk >= 0.5) %>%
+    # select(c(1:5)) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+  
+  plot_df = merge(input, phi, by = 0) %>%
+    merge(., gene_info, by.x="Row.names", by.y = 0)%>%
+    mutate(phase_error = (phi -phi_sd ))
+  plot_df$phi_true = phi_sd
+
+  output <- append(output, list(plot_df))
+}
+
+#convert list into dataframe
+df = do.call(rbind, output)
+df$trial = trial
+trials[[trial]] <- df
+rm(df)
+}
+
+#save(trials, file = "~/Desktop/realistic_sim_10Trials.RData")
+load("./figures/simulations/phi_accuracy_of_median_phis/realistic_sim_10Trials.RData")
+trials_df =  do.call(rbind, trials)
+
+########
+trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5)
+median_df <- trials_df_filt %>%
+  dplyr::group_by(trial, phi_true) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE))
+
+#Plot: Phi sd pred acc vs true phi sd
+median_df$phi_true_factor = as.factor(median_df$phi_true*12/pi)
+
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+phi_acc_plot_medians_realistic = ggplot(median_df, aes(x = phi_true*12/pi,y =  median_phi*12/pi))+
+  # geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+  geom_jitter(
+  aes(x = phi_true*12/pi, y = median_phi*12/pi, fill = phi_true*12/pi), 
+  alpha = 0.7,
+  position = position_jitter(width = jitter_width, seed = jitter_seed),
+  shape = 21,
+  size = 4,
+  color = "grey32"
+  )+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  xlab("True phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 5))+
+  guides(fill = "none")    # remove fill legend
+ggsave("~/Desktop/phi_acc_plot_medians_realistic_points.pdf", plot = phi_acc_plot_medians_realistic, width = 4, height = 4, units = "in")  
+```
+
+### Idealized:
+
+```{r}
+trials <- vector("list", 10)
+names(trials) <- paste0("V", seq(1,10))
+for(trial in 1:10){
+message("Trial:", trial)
+output = list()
+for(i in seq(0, 4.5, by = 0.5)){
+  message("Phi true:", i)
+  phi_sd = i/12*pi
+  epsilon_sd = 0.3
+
+  sim <- simulate_scRNAseq_circadian(n = 24000, m = 10000, p_circ = .1, phi_sd = phi_sd, n_time_points = 12,
+                amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1, 1.2), seed = trial)
+  
+  counts <- sim$counts
+  metadata <- sim$cell_metadata
+  gene_info <- sim$gene_parameters
+  
+  seurat_obj <- CreateSeuratObject(counts = counts, meta.data = metadata)
+  seurat_obj$orig.ident = seurat_obj$time_point
+  seurat_obj$seurat_clusters = "0"
+  
+  s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj)
+  orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = "0", grouping_var = "seurat_clusters")
+  
+  tmp = orpheus_inputs[[1]]
+  pb_mat = tmp[[1]]
+  var_mat = tmp[[2]]
+
+  ZT = as.numeric(colnames(pb_mat) )
+  
+  pb_cycling = is_cycling(ZT, pb_mat, time_units = "rad")
+  circ_genes = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
+  circ_genes_phases = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(acrophase_bulk)  %>% unname %>% unlist %>% as.numeric
+  
+ 
+  var_cyclers = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
+  
+  phi = calc_phi( pb_cycling, var_cyclers, bulk_amp_thr = 0 )
+  
+  input = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix= c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+    # filter(keep_acrodiff == TRUE) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, everything()) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    # filter( amplitude_bulk >= 0.5) %>%
+    # select(c(1:5)) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+  
+  plot_df = merge(input, phi, by = 0) %>%
+    merge(., gene_info, by.x="Row.names", by.y = 0)%>%
+    mutate(phase_error = (phi -phi_sd ))
+  plot_df$phi_true = phi_sd
+
+  output <- append(output, list(plot_df))
+}
+
+#convert list into dataframe
+df = do.call(rbind, output)
+df$trial = trial
+trials[[trial]] <- df
+rm(df)
+}
+
+# save(trials, file = "~/Desktop/idealized_sim_10Trials.RData")
+load("./figures/simulations/phi_accuracy_of_median_phis/idealized_sim_10Trials.RData")
+trials_df =  do.call(rbind, trials)
+
+########
+trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5)
+median_df <- trials_df_filt %>%
+  dplyr::group_by(trial, phi_true) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE))
+
+#Plot: Phi sd pred acc vs true phi sd
+median_df$phi_true_factor = as.factor(median_df$phi_true*12/pi)
+
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+phi_acc_plot_medians_idealized = ggplot(median_df, aes(x = phi_true*12/pi,y =  median_phi*12/pi))+
+  #geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+  geom_jitter(
+  aes(x = phi_true*12/pi, y = median_phi*12/pi, fill = phi_true*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed),
+  shape = 21,
+  size = 4,
+  color = "grey32"
+  )+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  xlab("True phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 5))+
+  guides(fill = "none")    # remove fill legend
+ggsave("~/Desktop/phi_acc_plot_medians_idealized_points.pdf", plot = phi_acc_plot_medians_idealized, width = 4, height = 4, units = "in")  
+```
+
+### Repeat idea above (accuracy of cell-type phi) but using 15 gene-wise estimates (to resemble mouse SCN).
+
+```{r}
+load("./figures/simulations/phi_accuracy_of_median_phis/realistic_sim_10Trials.RData")
+trials_df =  do.call(rbind, trials)
+trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5)
+
+trials_df_filt %>% group_by(phi_true, trial) %>% summarize(count = n())
+set.seed(1234)
+# sampled_df <- trials_df_filt %>%
+#   group_by(phi_true, trial) %>%
+#   slice_sample(n = 15, replace = FALSE) %>%
+#   ungroup()
+# 
+# median_df <- sampled_df %>%
+#   dplyr::group_by(trial, phi_true) %>%
+#   dplyr::summarise(median_phi = median(phi, na.rm = TRUE))
+sampled_df <- map_dfr(1:10, \(i) {
+  trials_df_filt %>%
+    group_by(phi_true, trial) %>%
+    slice_sample(n = 15, replace = TRUE) %>%      # Set replace = TRUE here
+    mutate(sample_iteration = i)                  # Keep track of which sample this is
+}) %>%
+  ungroup()
+median_df <- sampled_df %>%
+  dplyr::group_by(trial, phi_true, sample_iteration) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE))
+
+#Plot: Phi sd pred acc vs true phi sd
+median_df$phi_true_factor = as.factor(median_df$phi_true*12/pi)
+
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+phi_acc_plot_medians_realistic_downsampled = ggplot(median_df, aes(x = phi_true*12/pi,y =  median_phi*12/pi))+
+  geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+  # geom_jitter(
+  # aes(x = phi_true*12/pi, y = median_phi*12/pi, fill = phi_true*12/pi),
+  # alpha = 0.4,
+  # position = position_jitter(width = jitter_width, seed = jitter_seed),
+  # shape = 21,
+  # size = 4,
+  # color = "grey32"
+  # )+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  xlab("True phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 5))+
+  guides(fill = "none")    # remove fill legend
+
+ggsave("~/Desktop/phi_acc_plot_medians_realistic_15_genes_10_samplings_per_truePhi.pdf", plot = phi_acc_plot_medians_realistic_downsampled, width = 4, height = 4, units = "in")  
+```
+
+```{r}
+load("./figures/simulations/phi_accuracy_of_median_phis/idealized_sim_10Trials.RData")
+trials_df =  do.call(rbind, trials)
+trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5)
+
+set.seed(1234)
+# sampled_df <- trials_df_filt %>%
+#   group_by(phi_true, trial) %>%
+#   slice_sample(n = 15, replace = FALSE) %>%
+#   ungroup()
+# 
+# median_df <- sampled_df %>%
+#   dplyr::group_by(trial, phi_true) %>%
+#   dplyr::summarise(median_phi = median(phi, na.rm = TRUE))
+sampled_df <- map_dfr(1:10, \(i) {
+  trials_df_filt %>%
+    group_by(phi_true, trial) %>%
+    slice_sample(n = 15, replace = TRUE) %>%      # Set replace = TRUE here
+    mutate(sample_iteration = i)                  # Keep track of which sample this is
+}) %>%
+  ungroup()
+median_df <- sampled_df %>%
+  dplyr::group_by(trial, phi_true, sample_iteration) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE))
+
+#Plot: Phi sd pred acc vs true phi sd
+median_df$phi_true_factor = as.factor(median_df$phi_true*12/pi)
+
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+phi_acc_plot_medians_idealized_downsampled = ggplot(median_df, aes(x = phi_true*12/pi,y =  median_phi*12/pi))+
+  geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+  # geom_jitter(
+  # aes(x = phi_true*12/pi, y = median_phi*12/pi, fill = phi_true*12/pi), 
+  # alpha = 0.4,
+  # position = position_jitter(width = jitter_width, seed = jitter_seed),
+  # shape = 21,
+  # size = 4,
+  # color = "grey32"
+  # )+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  xlab("True phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 5))+
+  guides(fill = "none")    # remove fill legend
+
+ggsave("~/Desktop/phi_acc_plot_medians_idealized_15_genes_10_samplings_per_truePhi.pdf", plot = phi_acc_plot_medians_idealized_downsampled, width = 4, height = 4, units = "in")  
 ```

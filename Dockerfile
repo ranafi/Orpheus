@@ -27,4 +27,4 @@ RUN R -e "install.packages(c( 'circular', 'enrichR', 'ggpubr', 'dplyr', 'foreach
 # 5. Install Orpheus package from the local context
 # This copies  current folder into the container and installs it
 COPY . /home/rstudio/Orpheus
-## RUN R -e "devtools::install('/home/rstudio/Orpheus', dependencies=TRUE)"
+RUN R -e "devtools::install('/home/rstudio/Orpheus', dependencies=TRUE)"
