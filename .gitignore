@@ -1,9 +1,5 @@
-examples/input*
-examples/output/*
-examples/*.h5Seurat
-examples/*.RData
+examples/
 .DS_Store
-examples/.DS_Store
 R/.Rhistory
 R/.DS_Store
 R/output/*
@@ -28,3 +24,5 @@ examples_fixed_acrophase/mouse_SCN_extraCode.qmd
 examples_fixed_acrophase/AD_cells_extraCode.qmd
 examples_fixed_acrophase/Simulated_orpheus_data_nb_experimental.qmd
 examples_fixed_acrophase/mouse_liver_analysis_CLEAN.qmd
+examples_fixed_acrophase/OLD_mouse_liver_analysis_hepa_only.qmd
+examples_fixed_acrophase/OLD_mouse_liver_analysis.qmd
