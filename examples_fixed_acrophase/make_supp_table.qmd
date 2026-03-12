@@ -1,0 +1,63 @@
+---
+title: "Make_supp_table"
+format: html
+editor: visual
+---
+
+## Read in ORHPUS results
+
+```{r}
+#SCN
+load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_varPthr05.RData")
+
+SCN = filter(cos_phis_tmm, Source %in% c("cckc1ql3", "vipnms"), !is.na(phi)) %>% select(c("Row.names","Source", "G", "Ac","theta", "phi", "double_freq_amplitude", "fund_amp","var_mesor", "amplitude_bulk", "mesor_bulk","acrophase_bulk",  "partial_model_AIC_var", "full_model_AIC_var"  )) %>% rename("12hr_amp_var" = "double_freq_amplitude") %>%
+  rename("24hr_amp_var" = "fund_amp") %>%
+  rename("24hr_amp_bulk" = "amplitude_bulk") %>%
+  rename("mesor_var" = "var_mesor")%>%
+  rename("genes" = "Row.names") %>%
+  rename("cell_type" = "Source") %>%
+  rename("NB_theta" = "theta") %>%
+  rename("phi_phase_dispersion" = "phi")
+
+#SCN
+load("./figures/mouse_liver_clean/Bootejtk_hepatocytes_combined/orpheus_results_hepatocytes_combined_ejtk_list_to_regression.RData")
+
+hepa_combined = filter(cos_phis_tmm, !is.na(phi)) %>% select(c("Row.names","Source", "G", "Ac","theta", "phi", "double_freq_amplitude", "fund_amp","var_mesor", "amplitude_bulk", "mesor_bulk","acrophase_bulk",  "partial_model_AIC_var", "full_model_AIC_var"  )) %>% rename("12hr_amp_var" = "double_freq_amplitude") %>%
+  rename("24hr_amp_var" = "fund_amp") %>%
+  rename("24hr_amp_bulk" = "amplitude_bulk") %>%
+  rename("mesor_var" = "var_mesor")%>%
+  rename("genes" = "Row.names") %>%
+  rename("cell_type" = "Source") %>%
+  rename("NB_theta" = "theta") %>%
+  rename("phi_phase_dispersion" = "phi")
+
+load("./figures/mouse_liver_clean/Bootejtk_4_subtypes_different_genes/HepaCombinedEjtkGenes_on_4_subtypes/phis_ejtkList_to_regression_fromHepaCombinedAnalysis_FixedRegressionVarSignal_varPthr05.RData")
+
+
+hepa_sep =filter(cos_phis_tmm, !is.na(phi)) %>% select(c("Row.names","Source", "G", "Ac","theta", "phi", "double_freq_amplitude", "fund_amp","var_mesor", "amplitude_bulk", "mesor_bulk","acrophase_bulk",  "partial_model_AIC_var", "full_model_AIC_var"  )) %>% rename("12hr_amp_var" = "double_freq_amplitude") %>%
+  rename("24hr_amp_var" = "fund_amp") %>%
+  rename("24hr_amp_bulk" = "amplitude_bulk") %>%
+  rename("mesor_var" = "var_mesor")%>%
+  rename("genes" = "Row.names") %>%
+  rename("cell_type" = "Source") %>%
+  rename("NB_theta" = "theta") %>%
+  rename("phi_phase_dispersion" = "phi")
+
+load("./figures/rosmap_exc35/phis_exc35_ad_ctl.RData")
+cos_phis_tmm$cell_type = "excitatory_neurons35"
+exc35=filter(cos_phis_tmm, !is.na(phi)) %>% select(c("Row.names","Source","cell_type", "G", "Ac","theta", "phi", "double_freq_amplitude", "fund_amp","var_mesor", "amplitude_bulk", "mesor_bulk","acrophase_bulk",  "partial_model_AIC_var", "full_model_AIC_var"  )) %>% rename("12hr_amp_var" = "double_freq_amplitude") %>%
+  rename("24hr_amp_var" = "fund_amp") %>%
+  rename("24hr_amp_bulk" = "amplitude_bulk") %>%
+  rename("mesor_var" = "var_mesor")%>%
+  rename("genes" = "Row.names") %>%
+  rename("condition" = "Source") %>%
+  rename("NB_theta" = "theta") %>%
+  rename("phi_phase_dispersion" = "phi")
+```
+
+```{r}
+library(writexl)
+list_of_data <- list("mouse SCN" = SCN, "mouse hepatocytes combined" = hepa_combined, "mouse hepatocytes separate" = hepa_sep, "Human exc neurons" = exc35)
+write_xlsx(list_of_data, path = "~/Desktop/tab_S1.xlsx")
+
+```

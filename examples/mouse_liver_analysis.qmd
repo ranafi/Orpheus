@@ -16,7 +16,7 @@ seurat_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object.Rds"
 seurat_obj$seurat_clusters = seurat_obj$all_cell_types
 ```
 
-clustering:
+show clustering:
 
 ```{r}
 DimPlot(seurat_obj, reduction = "umap", group.by = "all_cell_types")
@@ -39,10 +39,15 @@ table(seurat_obj$seurat_clusters, seurat_obj$orig.ident)
 ### What are reasonable params for my simulated data?
 
 ```{r}
-tmp = extract_clstr_prep_input(seurat_obj, cluster_id = "hepatocytes 2", normalize = F)
-pb_mat = tmp[[1]]
-var_mat = tmp[[2]]
-counts = tmp[[3]]
+s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA")
+tmp = calculate_orpheus_inputs(s_obj, groups_to_analyze = "hepatocytes 1", grouping_var = "seurat_clusters")
+
+
+hep2 = tmp$`hepatocytes 1`
+pb_mat = hep2[[1]]
+var_mat = hep2[[2]]
+counts = hep2[[3]]
+dim(counts)
 
 matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
 ZT = as.numeric(matches[,2])
@@ -54,155 +59,70 @@ theta_estimate = data.frame(coarse_theta = (vars-means)/means^2)
 summary(theta_estimate$coarse_theta)
 summary(means)
 
-#Reasonable estimates for theta: 0.01 - 2.5
+#Reasonable estimates for theta: 0.05 - 1.5
 quantile(theta_estimate$coarse_theta, probs = c(0.05, .95))
 
-#Reasonable range for gene means (G): 0.05 - 5
+#Reasonable range for gene means (G): 0.1 - 5
 quantile(means, probs = c(0.05, .95))
 
 cyclers = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
 cyclers$p_statistic = as.numeric(cyclers$p_statistic)
 
-#What fraction of genes should I make rhythmic? 0.3
-sig_cyclers = dplyr::filter(cyclers,p_statistic < 0.05)
+#What fraction of genes should I make rhythmic? 0.10
+sig_cyclers = dplyr::filter(cyclers, p_statistic < 0.05)
 sig_cyclers %>% nrow / nrow(cyclers)
 
-#Reasonable range for cycling amplitude_ratio?: 0.3 - 0.75
+#Reasonable range for cycling amplitude_ratio?: 0.15 - 0.75
 quantile(as.numeric(sig_cyclers$amp_ratio), probs = c(0.05, 0.95))
-
-```
-
-### Testing pseudoreplicate effect:
-
-```{r}
-# tmp = extract_clstr_prep_input2(seurat_obj, cluster_id = "hepatocytes 2", clip_sd = 10, normalize = T)
-# 
-# pb_mat = tmp[[1]]
-# var_mat = tmp[[2]]
-# 
-# # Reshape ground truth data into a long format for easy comparison
-# truth_mean_long <- pb_mat %>%
-#   tibble::rownames_to_column("gene") %>%
-#   pivot_longer(-gene, names_to = "orig.ident", values_to = "truth_mean")
-# 
-# truth_var_long <- var_mat %>%
-#   tibble::rownames_to_column("gene") %>%
-#   pivot_longer(-gene, names_to = "orig.ident", values_to = "truth_var")
-# 
-# ground_truth_df <- full_join(truth_mean_long, truth_var_long, by = c("gene", "orig.ident"))
-# 
-# 
-# results_list <- list()
-# for(i in seq(2, 10, by = 2)){
-#   message(paste("Processing for num_replicates =", i))
-#   rep_tmp = extract_clstr_prep_input2(seurat_obj, cluster_id = "hepatocytes 2", clip_sd = 100, normalize = T, num_replicates = i)
-#   
-#   pb_mat_rep = rep_tmp[[1]]
-#   var_mat_rep = rep_tmp[[2]]
-#   # Reshape replicate data into a long format
-#   rep_mean_long <- pb_mat_rep %>%
-#     tibble::rownames_to_column("gene") %>%
-#     pivot_longer(-gene, names_to = "replicate_id", values_to = "rep_mean") %>%
-#     separate(replicate_id, into = c("orig.ident", "rep_num"), sep = "_rep", remove = FALSE)
-#   
-#   rep_var_long <- var_mat_rep %>%
-#     tibble::rownames_to_column("gene") %>%
-#     pivot_longer(-gene, names_to = "replicate_id", values_to = "rep_var") %>%
-#     separate(replicate_id, into = c("orig.ident", "rep_num"), sep = "_rep", remove = FALSE)
-#   
-#   # Calculate average mean and variance across replicates for each subject
-#   avg_rep_stats <- full_join(rep_mean_long, rep_var_long, by = c("gene", "replicate_id", "orig.ident", "rep_num")) %>%
-#     group_by(gene, orig.ident) %>% #group together the pseudoreps
-#     summarise(
-#       avg_rep_mean = mean(rep_mean, na.rm = TRUE),
-#       avg_rep_var = mean(rep_var, na.rm = TRUE),
-#       .groups = "drop"
-#     )
-#   
-#   # Calculate Cells/Replicate and Quantify Departure 
-#   
-#   # Get the number of cells per replicate
-#   # total_cells_per_subject <- table(replicate_data_list$counts$orig.ident)
-#   # avg_cells_per_rep <- mean(total_cells_per_subject / i)
-#   
-#   # Join with ground truth to calculate metrics
-#   comparison_df <- left_join(avg_rep_stats, ground_truth_df, by = c("gene", "orig.ident"))
-#   
-#   # Bin genes into Low, Middle, and High expression groups based on the ground truth mean
-#   # We do this within each subject to account for subject-specific expression shifts
-#   binned_metrics <- comparison_df %>%
-#     filter(!is.na(truth_mean)) %>%
-#     group_by(orig.ident) %>%
-#     mutate(
-#       expression_bin = ntile(truth_mean, 3), # Create 3 quantile bins (tertiles)
-#       expression_bin = factor(expression_bin, levels = 1:3, labels = c("Low", "Middle", "High"))
-#     ) %>%
-#     ungroup() %>%
-#     # Now calculate metrics PER BIN for each subject
-#     group_by(orig.ident, expression_bin) %>%
-#     summarise(
-#       rmse_mean = sqrt(mean((avg_rep_mean - truth_mean)^2, na.rm = TRUE)),
-#       rmse_var = sqrt(mean((avg_rep_var - truth_var)^2, na.rm = TRUE)),
-#       cor_mean = cor(avg_rep_mean, truth_mean, use = "pairwise.complete.obs"),
-#       cor_var = cor(avg_rep_var, truth_var, use = "pairwise.complete.obs"),
-#       .groups = "drop"
-#     ) %>%
-#     # Finally, average the metrics across all subjects for each bin
-#     group_by(expression_bin) %>%
-#     summarise(
-#       mean_rmse_mean = mean(rmse_mean, na.rm = TRUE),
-#       mean_rmse_var = mean(rmse_var, na.rm = TRUE),
-#       mean_cor_mean = mean(cor_mean, na.rm = TRUE),
-#       mean_cor_var = mean(cor_var, na.rm = TRUE),
-#       .groups = "drop"
-#     )
-# 
-#   # Store results
-#   results_list[[as.character(i)]] <- binned_metrics %>%
-#     mutate(
-#       num_replicates = i    )
-#   
-# }
-# 
-# 
-# # Combine all results into a single data frame
-# final_results_df <- bind_rows(results_list)
-# 
-# 
-# 
-# # Plot RMSE vs. Cells per Replicate, faceted by expression bin
-# plot_rmse_binned <- ggplot(final_results_df, aes(x = num_replicates)) +
-#   geom_line(aes(y = mean_rmse_mean, color = "Mean")) +
-#   geom_point(aes(y = mean_rmse_mean, color = "Mean")) +
-#   geom_line(aes(y = mean_rmse_var, color = "Variance")) +
-#   geom_point(aes(y = mean_rmse_var, color = "Variance")) +
-#   facet_wrap(~ expression_bin, scales = "free_y") + # Use free y-axis scales
-#   scale_x_reverse() +
-#   labs(
-#     title = "Departure of Pseudoreplicate Statistics by Expression Level (RMSE)",
-#     x = "num_replicates",
-#     y = "Root Mean Squared Error (RMSE)",
-#     color = "Statistic"
-#   ) +
-#   theme_minimal() +
-#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-
 
 ```
 
 ## Now do Methods of Moments analysis (ORPHEUS)
 
+Here we assign cells of each subject to one of two pseudoreplicates, we will do this 4 times and consider results found in all four folds.
+
 ```{r}
+s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA")
+
+seeds <- c(1,2,3,4)
+#Initialize an empty list to store all results
+all_results_combined <- list()
+for(i in seeds){
+  message(paste("--- Running ORPHEUS with seed:", i, "---"))
+    
+    # returns a list like: list('CellTypeA' = ..., 'CellTypeB' = ...)
+    results_one_seed <- calculate_orpheus_inputs(
+      s_obj, 
+      groups_to_analyze = unique(s_obj$seurat_clusters), 
+      grouping_var = "seurat_clusters", 
+      num_replicates = 2, 
+      random_seed = i
+    )
+    
+    # Modify the names to include the seed identifier
+    # prevents name clashes when we combine the lists.
+    original_names <- names(results_one_seed)
+    new_names <- paste0(original_names, "_seed", i)
+    names(results_one_seed) <- new_names
+    
+    # Append the newly named results to main list
+    all_results_combined <- c(all_results_combined, results_one_seed)
+}
+# Check the names of the final combined list
+print("Names of the final combined list:")
+print(names(all_results_combined))
+
+
+##############OLD CODE#######
+
 cluster_phis = list()
-for(cell_type in unique(seurat_obj$seurat_clusters)){
+for(cell_type in names(all_results_combined)){
   
-for(seed in c(1:4))  {
-print(paste("Analyzing", cell_type, "seed", seed))
+print(paste("Analyzing", cell_type))
 
 
 # tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
-tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, normalize = T, num_replicates = 2, random_seed = seed)
+tmp = all_results_combined[[cell_type]]
 pb_mat = tmp[[1]]
 var_mat = tmp[[2]]
 counts = tmp[[3]]
@@ -256,10 +176,10 @@ output = merge(output, agg_theta_meas, by.x = "Row.names", by.y = 0)
 
 
 local_res =  list("tmm" = output)
-names(local_res) = paste0(cell_type,"_seed" ,seed)
+names(local_res) = cell_type
 cluster_phis <- append(cluster_phis, list(local_res))
 }
-}
+
 ```
 
 ### Combine lists from different celltypes/pseudoreplicates and plot
@@ -272,7 +192,12 @@ cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_n
 }))
 
 save(cos_phis_tmm, file = "~/Desktop/phis_2pr_4folds_unfilt.RData")
-load("../../figures/mouse_liver/two_pseudoreps_4Folds/phis_2pr_4folds_unfilt.RData")
+```
+
+### Fold Averaging seeds
+
+```{r}
+load("../../figures/mouse_liver/phis_2pr_4folds_unfilt.RData")
 
 cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi))
 table(cos_phis_tmm_filt$Source)
@@ -300,6 +225,19 @@ phis_seed_avg <- phis_consensus %>%
     cell = first(cell),
     .groups = "drop"
   ) %>% filter(cell %in% c("hepatocytes 1","hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes"))
+
+save(phis_seed_avg, file = "~/Desktop/phis_2pr_4folds_seed_avg.RData")
+```
+
+### Load Phis_seed_avg object
+
+```{r}
+load("../../figures/mouse_liver/phis_2pr_4folds_seed_avg.RData")
+```
+
+### Plotting
+
+```{r}
 
 jitter_width <- 0.15
 jitter_seed <- 123 # A specific seed for reproducibility
@@ -334,7 +272,7 @@ pairwise.wilcox.test(phis_seed_avg$phi, phis_seed_avg$cell,
 
 acrodiff_compare_pseudorep = ggplot(phis_seed_avg, aes(x = acrodiff*12/pi, fill = cell)) +
   geom_histogram(binwidth = 2, color = "black", alpha = 1, breaks = seq(0, 12, by = 2)) +
-  facet_wrap(~ as.factor(cell), scales = "free_y", nrow = 1) +
+  facet_wrap(~ as.factor(cell), scales = "free_y", nrow = 2) +
   scale_fill_manual(values = custom_colors) +
   guides(fill = "none") +    # remove fill legend
   xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
@@ -356,7 +294,7 @@ acrodiff_compare_pseudorep = ggplot(phis_seed_avg, aes(x = acrodiff*12/pi, fill 
     expand = c(0, 0)
   )
 
-ggsave("~/Desktop/acrodiff_compare_pseudorep.pdf", plot = acrodiff_compare_pseudorep, device = "pdf", width = 10, height = 4, units = "in") 
+ggsave("~/Desktop/acrodiff_compare_pseudorep.pdf", plot = acrodiff_compare_pseudorep, device = "pdf", width =6, height = 7, units = "in") 
 
 
 gene_sets <- phis_seed_avg %>%
@@ -643,11 +581,378 @@ wilcox.test(hepa1_central_test_df$`Ac_hepatocytes 1`, hepa1_central_test_df$`Ac_
 wilcox.test(hepa1_central_test_df$`amplitude_bulk_hepatocytes 1`, hepa1_central_test_df$`amplitude_bulk_pericentral hepatocytes`, paired = T)
 
 
-#--------------------------------
-save(phis_consensus, file = "~/Desktop/phis_2pr_4folds.RData")
 ```
 
-### Write out RNKS
+## Cell Receptor plots
+
+```{r}
+s_obj =  seurat_obj
+
+#I will take raw counts from seurat, pseudobulk them by cell type and individual, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva:
+summed_cts = AggregateExpression(s_obj,
+                           assays = "RNA", 
+                           layers = "counts", 
+                           group.by = c("seurat_clusters", "orig.ident"))
+summed_cts = summed_cts$RNA
+
+y <- DGEList(counts = summed_cts)
+keep <- filterByExpr(y)
+y <- y[keep, , keep.lib.sizes = FALSE]
+y <- calcNormFactors(y, method = "TMM")
+# Get log-transformed Counts Per Million (logCPM)
+logcpm_pseudobulk <- cpm(y, log = T)
+
+
+#Now, I only need a single, average expression value for each cell type, so I will take the average of the logcpm values above for each cell type:
+celltypes <- sub("_.*", "", colnames(logcpm_pseudobulk))
+
+celltype_avg_logcpm <- sapply(split(seq_along(celltypes), celltypes), function(idx) {
+  rowMeans(logcpm_pseudobulk[, idx, drop = FALSE])
+}) %>% as.data.frame
+
+scn_receptors <- c("Nr3c1", "Adrb2", "Adrb3", "Mtnr1a", "Mtnr1b")
+feeding_receptors <- c("Insr", "Igf1r","Gcgr")
+nutrient_sensors <- c("Mtor", "Rps6kb1", "Eif4ebp1", "Prkaa1", "Prkaa2")
+
+# Combine them into a single list for convenience
+genes_to_test <- c(scn_receptors, feeding_receptors, nutrient_sensors)
+
+
+# Reshape the data from "wide" to "long" for ggplot
+avg_expression_long <- celltype_avg_logcpm %>%
+  rownames_to_column("gene") %>%  # Convert gene names from rownames to a column
+  pivot_longer(
+    cols = -gene,        # Pivot all columns except for the gene column
+    names_to = "cell_type",     # The new column for the cell type names
+    values_to = "avg_expression" # The new column for the expression values
+  )
+
+load("../../figures/mouse_liver/phis_2pr_4folds_seed_avg.RData")
+
+
+median_phi_by_cell <- phis_seed_avg %>%
+  group_by(cell) %>%
+  summarise(median_phi = median(phi*12/pi, na.rm = TRUE))
+
+plot_df = left_join(avg_expression_long, median_phi_by_cell, by = join_by(cell_type == cell)) %>% filter(cell_type %in% c("hepatocytes 1","hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes") & gene %in% c( "Gcgr", "Insr", "Nr3c1"))
+
+plot_df$gene <- factor(plot_df$gene, levels = c("Nr3c1", "Insr", "Gcgr"))
+
+library(ggpubr)
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+
+faceted_correlation_plot <- ggplot(plot_df, aes(x = avg_expression, y = median_phi)) +
+  # Add the points for each cell type
+  geom_point(aes(color = cell_type), size = 4, alpha = 0.8) + 
+  scale_color_manual(values = custom_colors) +
+  # Add a linear regression line to visualize the trend in each facet
+  geom_smooth(method = "lm", se = FALSE, color = "firebrick", linetype = "dashed", linewidth = 1) +
+  # Add non-overlapping labels for each point using the 'cell_type' column
+  # This is the key to knowing which point is which cell type.
+  ggrepel::geom_text_repel(aes(label = cell_type),color = "black", box.padding = 0.1, max.overlaps = Inf, seed = 123) +
+  # Add the Spearman correlation coefficient and p-value to each facet
+  # Spearman is robust for small N (N=4).
+  # stat_cor(method = "spearman",  size = 4, label.x.npc = "middle", label.y.npc = 0.8) +
+  # Create a separate plot for each gene
+  facet_wrap(~ gene, scales = "free_x", nrow = 1) +
+  # --- Aesthetics and Labels ---
+  labs(
+    title = "Relationship Between Receptor Expression and Cellular Synchrony",
+    subtitle = "Each point represents a cell type (N=4). Spearman corr.",
+    x = "Average gene expression (avg log cpm)",
+    y = "Median phase dispersion (hrs)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+guides(color = "none")     # remove fill legend
+
+ggsave("~/Desktop/mouse_liver_receptor_v_phi.pdf",plot = faceted_correlation_plot, device = "pdf", width = 9, height = 4)
+
+```
+
+## Stratify cell type by receptor expression:
+
+```{r}
+library(GSVA)
+library(msigdbr)
+library(edgeR)
+s_obj =  seurat_obj
+
+#I will take raw counts from seurat, pseudobulk them by cell type and individual, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva:
+summed_cts = AggregateExpression(s_obj,
+                           assays = "RNA", 
+                           layers = "counts", 
+                           group.by = c("seurat_clusters", "orig.ident"))
+summed_cts = summed_cts$RNA
+
+y <- DGEList(counts = summed_cts)
+keep <- filterByExpr(y)
+y <- y[keep, , keep.lib.sizes = FALSE]
+y <- calcNormFactors(y, method = "TMM")
+# Get log-transformed Counts Per Million (logCPM)
+logcpm_pseudobulk <- cpm(y, log = T)
+
+
+#Now, I only need a single, average expression value for each cell type, so I will take the average of the logcpm values above for each cell type:
+celltypes <- sub("_.*", "", colnames(logcpm_pseudobulk))
+
+celltype_avg_logcpm <- sapply(split(seq_along(celltypes), celltypes), function(idx) {
+  rowMeans(logcpm_pseudobulk[, idx, drop = FALSE])
+})
+
+
+#Get libraries
+mouse_reactome <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2", subcollection = "CP:REACTOME")
+genesets_list <- split(mouse_reactome$gene_symbol, mouse_reactome$gs_name)
+
+#mouse_hallmark <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "MH")
+#genesets_list <- split(mouse_hallmark$gene_symbol, mouse_hallmark$gs_name)
+
+#mouse_BP <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M5", subcollection = "GO:BP")
+#genesets_list <- split(mouse_BP$gene_symbol, mouse_BP$gs_name)
+
+
+gsva_res = gsva(celltype_avg_logcpm, genesets_list) %>% as.data.frame
+
+load("../../figures/mouse_liver/phis_2pr_4folds_seed_avg.RData")
+
+
+median_phi_by_cell <- phis_seed_avg %>%
+  group_by(cell) %>%
+  summarise(median_phi = median(phi*12/pi, na.rm = TRUE))%>%
+  rename(cell_type = cell) # Rename for joining
+
+# Convert gsva results to long format and join
+gsva_long <- gsva_res %>%
+  rownames_to_column("pathway") %>%
+  pivot_longer(cols = -pathway, names_to = "cell_type", values_to = "gsva_score")
+
+# Join the two data frames
+combined_data <- left_join(gsva_long, median_phi_by_cell, by = "cell_type") %>% filter(cell_type %in% c("hepatocytes 1","hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes"))
+
+# Calculate the final, reliable correlations
+correlation_results <- combined_data %>%
+  group_by(pathway) %>%
+  summarise(
+    correlation = cor(gsva_score, median_phi, method = "spearman", use = "complete.obs"),
+    correlation_pearson  = cor(gsva_score, median_phi, method = "pearson",  use = "complete.obs"),
+
+    .groups = 'drop'
+  )
+
+# Check your top hits now
+print(arrange(correlation_results, correlation)) # Most negative
+print(arrange(correlation_results, desc(correlation))) # Most positive
+
+write.table(correlation_results, "~/Desktop/gsva_REACTOME_score_vs_phis.csv", sep = ",", row.names = F)
+```
+
+### Plot pathway results of interest
+
+```{r}
+
+library(ggpubr)
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+
+
+pos_pathways = correlation_results %>%
+  filter((correlation)>= 0.8)
+pos_pathway_corr = filter(combined_data, pathway %in% pos_pathways$pathway)
+
+
+pos_pathway_correlation_plot <- ggplot(pos_pathway_corr, aes(x = gsva_score, y = median_phi)) +
+  # Add the points for each cell type
+  geom_point(aes(color = cell_type), size = 4, alpha = 0.8) + 
+  scale_color_manual(values = custom_colors) +
+  # Add a linear regression line to visualize the trend in each facet
+  geom_smooth(method = "lm", se = FALSE, color = "firebrick", linetype = "dashed", linewidth = 1) +
+  # Add non-overlapping labels for each point using the 'cell_type' column
+  # This is the key to knowing which point is which cell type.
+  ggrepel::geom_text_repel(aes(label = cell_type),color = "black", box.padding = 0.1, max.overlaps = Inf, seed = 123) +
+  # Add the Spearman correlation coefficient and p-value to each facet
+  # Spearman is robust for small N (N=4).
+  # stat_cor(method = "spearman",  size = 4, label.x.npc = "middle", label.y.npc = 0.8) +
+  # Create a separate plot for each gene
+  facet_wrap(~ pathway, scales = "free_x", nrow = 1, labeller = labeller(pathway = function(x) str_wrap(str_replace_all(x, "_", " "), 20)))  +
+  # --- Aesthetics and Labels ---
+  labs(
+    title = "Relationship Between Pathway GSVA score and Cellular Synchrony",
+    subtitle = "Each point represents a cell type (N=4)",
+    x = "GSVA score",
+    y = "Median phase dispersion (hrs)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+guides(color = "none")     # remove fill legend
+
+
+
+
+neg_pathways = correlation_results %>%
+  filter((correlation)<= -0.8)
+neg_pathway_corr = filter(combined_data, pathway %in% neg_pathways$pathway)
+#Some of these don't have a great Pearson correaltion I will remove those:
+neg_pathway_corr = filter(neg_pathway_corr, !(pathway %in% c("HALLMARK_G2M_CHECKPOINT", "HALLMARK_PI3K_AKT_MTOR_SIGNALING")))
+
+neg_pathway_correlation_plot <- ggplot(neg_pathway_corr, aes(x = gsva_score, y = median_phi)) +
+  # Add the points for each cell type
+  geom_point(aes(color = cell_type), size = 4, alpha = 0.8) + 
+  scale_color_manual(values = custom_colors) +
+  # Add a linear regression line to visualize the trend in each facet
+  geom_smooth(method = "lm", se = FALSE, color = "firebrick", linetype = "dashed", linewidth = 1) +
+  # Add non-overlapping labels for each point using the 'cell_type' column
+  # This is the key to knowing which point is which cell type.
+  ggrepel::geom_text_repel(aes(label = cell_type),color = "black", box.padding = 0.1, max.overlaps = Inf, seed = 123) +
+  # Add the Spearman correlation coefficient and p-value to each facet
+  # Spearman is robust for small N (N=4).
+  # stat_cor(method = "spearman",  size = 4, label.x.npc = "middle", label.y.npc = 0.8) +
+  # Create a separate plot for each gene
+  facet_wrap(~ pathway, scales = "free_x", nrow = 2, labeller = labeller(pathway = function(x) str_wrap(str_replace_all(x, "_", " "), 20)))  +
+  # --- Aesthetics and Labels ---
+  labs(
+    title = "Relationship Between Pathway GSVA score and Cellular Synchrony",
+    subtitle = "Each point represents a cell type (N=4)",
+    x = "GSVA score",
+    y = "Median phase dispersion (hrs)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+guides(color = "none")     # remove fill legend
+
+
+
+ggsave("~/Desktop/mouse_liver_pos_pathway_v_phi.pdf",plot = pos_pathway_correlation_plot, device = "pdf", width = 9, height = 4)
+ggsave("~/Desktop/mouse_liver_neg_pathway_v_phi.pdf",plot = neg_pathway_correlation_plot, device = "pdf", width = 9, height = 8)
+```
+
+### SCN vs Feeding pathway related plots
+
+```{r}
+reactome_corr = read_csv("../../figures/mouse_liver/gsva_REACTOME_score_vs_phis.csv")
+hallmark_corr = read_csv("../../figures/mouse_liver/gsva_HALLMARK_score_vs_phis.csv")
+GOBP_corr = read_csv("../../figures/mouse_liver/gsva_GOBP_score_vs_phis.csv")
+
+all_correlation_res = rbind(reactome_corr, hallmark_corr, GOBP_corr)
+
+central_entrainment = c("GOBP_RESPONSE_TO_GLUCOCORTICOID", "GOBP_ADRENERGIC_RECEPTOR_SIGNALING_PATHWAY", "GOBP_CAMP_MEDIATED_SIGNALING", "HALLMARK_P53_PATHWAY", "REACTOME_PKA_MEDIATED_PHOSPHORYLATION_OF_CREB", "GOBP_CELLULAR_RESPONSE_TO_DEXAMETHASONE_STIMULUS", "GOBP_CELLULAR_RESPONSE_TO_DEXAMETHASONE_STIMULUS")
+
+peripheral_entrainment = c("HALLMARK_PI3K_AKT_MTOR_SIGNALING", "HALLMARK_MTORC1_SIGNALING", "GOBP_INSULIN_RECEPTOR_SIGNALING_PATHWAY", "HALLMARK_ADIPOGENESIS", "HALLMARK_FATTY_ACID_METABOLISM", "REACTOME_VLDL_ASSEMBLY", "HALLMARK_OXIDATIVE_PHOSPHORYLATION", "REACTOME_GLUCONEOGENESIS", "GOBP_PROTEIN_KINASE_A_SIGNALING", "GOBP_RESPONSE_TO_GLUCAGON", "GOBP_CELLULAR_RESPONSE_TO_GLUCAGON_STIMULUS", "GOBP_CELLULAR_RESPONSE_TO_GLUCOSE_STARVATION", "GOBP_INSULIN_RECEPTOR_SIGNALING_PATHWAY", "GOBP_CELLULAR_RESPONSE_TO_INSULIN_STIMULUS")
+
+
+# Combine the lists of interest
+pathways_of_interest <- c(central_entrainment, peripheral_entrainment)
+
+# Filter the main results, add group labels, and clean up names
+plot_data <- all_correlation_res %>%
+  filter(pathway %in% pathways_of_interest) %>%
+  mutate(
+    # Create a new column to label each pathway's group
+    entrainment_type = case_when(
+      pathway %in% central_entrainment  ~ "Central (SCN-Driven)",
+      pathway %in% peripheral_entrainment ~ "Peripheral (Feeding/Fasting)"
+    ),
+    # Clean up long pathway names for better plotting
+    pathway_clean = str_replace(pathway, "HALLMARK_", "") %>%
+                    str_replace("GOBP_", "") %>%
+                    str_replace("REACTOME_", "") %>%
+                    str_replace_all("_", " ") %>%
+                    str_to_title()
+  )
+
+comparison_plot <- ggplot(
+  plot_data, 
+  aes(
+    # Reorder the pathways based on their correlation value for a clean, sorted look
+    x = reorder(pathway_clean, correlation), 
+    y = correlation, 
+    fill = entrainment_type
+  )
+) +
+  geom_col(color = "black", width = 0.7) +
+  geom_hline(yintercept = 0, color = "grey30") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("Central (SCN-Driven)" = "#0072B2", "Peripheral (Feeding/Fasting)" = "#D55E00"),
+    name = "Entrainment Signal Type" 
+  ) +
+  labs(
+    title = "Central SCN Signals are the Strongest Predictors of Cellular Synchrony",
+    subtitle = "Negative correlation indicates that high pathway activity is associated with high synchrony (low dispersion)",
+    x = NULL,
+    y = "Spearman Correlation with Phase Asynchrony"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  scale_y_continuous(limits = c(-1,1))
+print(comparison_plot)
+
+
+#####PLOT 2 ##########
+plot_data2 = filter(all_correlation_res, stringr::str_starts(pathway, "HALLMARK") & abs(correlation) >= 0.8) %>% mutate(
+    # Clean up long pathway names for better plotting
+    pathway_clean = str_replace(pathway, "HALLMARK_", "") %>%
+                    str_replace("GOBP_", "") %>%
+                    str_replace("REACTOME_", "") %>%
+                    str_replace_all("_", " ") %>%
+                    str_to_title()
+  )
+
+comparison_plot2 <- ggplot(
+  plot_data2, 
+  aes(
+    # Reorder the pathways based on their correlation value for a clean, sorted look
+    x = reorder(pathway_clean, correlation), 
+    y = correlation  )
+) +
+  geom_col(color = "black", width = 0.7) +
+  geom_hline(yintercept = 0, color = "grey30") +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Spearman Correlation with Phase Asynchrony"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  scale_y_continuous(limits = c(-1,1))
+print(comparison_plot2)
+```
+
+## Write out RNKS
 
 ```{r}
 hepa1_rnk = filter(phis_seed_avg, cell == "hepatocytes 1") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
@@ -665,6 +970,24 @@ write.table(hepa2_rnk, file = "~/Desktop/Mouse_liver_hepa2.rnk",
                   col.names = FALSE,
                   sep = "\t",
                   quote = F)
+
+pc_rnk = filter(phis_seed_avg, cell == "pericentral hepatocytes") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(pc_rnk, file = "~/Desktop/Mouse_liver_pc.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+pp_rnk = filter(phis_seed_avg, cell == "periportal hepatocytes") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(pp_rnk, file = "~/Desktop/Mouse_liver_pp.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa2_rnk = filter(phis_seed_avg, cell == "hepatocytes 2") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
 
 hepa1MinusPeriportal_rnk = data.frame(Gene_Symbols = hepa1_portal_test_df$Row.names,
                      metric = hepa1_portal_test_df$`phi_hepatocytes 1` - hepa1_portal_test_df$`phi_periportal hepatocytes`) %>% drop_na() %>% arrange(metric)
@@ -688,7 +1011,7 @@ write.table(hepa1MinusPericentral_rnk, file = "~/Desktop/Mouse_liver_hepa1MinusP
 ### Plot genes for celltypes
 
 ```{r}
-cell_type = "hepatocytes 1"
+cell_type = "hepatocytes 2"
 
 plot_me = phis_seed_avg %>% filter(cell == cell_type & as.numeric(double_freq_p_statistic) < 0.05) %>% arrange(as.numeric(double_freq_p_statistic)) %>% distinct(Row.names) %>% slice(1:5) %>% unname %>% unlist
 
@@ -702,10 +1025,53 @@ ZT = as.numeric(matches[,2])
 
 #"#E69F00", "#56B4E9", "#F8766D","#F0E442"
 
-Orpheus::plot_rhythms(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs", point_color = "black", line_color = "#E69F00")
+Orpheus::plot_rhythms(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs", point_color = "black", line_color = "#56B4E9")
+```
+
+### Pathway analysis
+
+```{r}
+library(msigdbr)
+
+mouse_reactome <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2", subcollection = "CP:REACTOME")
+
+
+pathway_strs = c("REACTOME_GLUCONEOGENESIS", "REACTOME_MITOCHONDRIAL_FATTY_ACID_BETA_OXIDATION", "REACTOME_UREA_CYCLE", "REACTOME_RESPIRATORY_ELECTRON_TRANSPORT", "REACTOME_METABOLISM_OF_LIPIDS", "REACTOME_GLUCOSE_METABOLISM", "REACTOME_CYTOCHROME_P450_ARRANGED_BY_SUBSTRATE_TYPE" )
+
+mouse_hallmark <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "MH")
+  
+pathway_strs = c("HALLMARK_OXIDATIVE_PHOSPHORYLATION", "HALLMARK_FATTY_ACID_METABOLISM", "HALLMARK_PEROXISOME", "HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY", "HALLMARK_GLYCOLYSIS", "HALLMARK_HYPOXIA", "HALLMARK_MTORC1_SIGNALING", "HALLMARK_XENOBIOTIC_METABOLISM")
+
+test_pathways = function(pathway_string, cell_type1, cell_type2){
+  pathway <- mouse_hallmark %>%
+  filter(gs_name == pathway_string) %>% select(gene_symbol) %>% unname %>% unlist
+  if(length(pathway)==0){message("Error, pathway not found.");return()}
+  
+  tmp = dplyr::filter(phis_seed_avg, cell %in% c(cell_type1, cell_type2))
+  if(length(table(tmp$cell)) != 2){message("Error with celltypes provided");return()}
+  cell_types_pathways = dplyr::filter(tmp, Row.names %in% pathway)
+  if(length(table(cell_types_pathways$cell)) != 2){message("Error, pathway not present for both cell types");return()}
+
+  unpaired_test = wilcox.test(phi ~ cell, data = cell_types_pathways)
+  return(unpaired_test)
+  # cell_types_pathways_paired
+  
+}
+
+test = sapply(pathway_strs, test_pathways, "periportal hepatocytes", "pericentral hepatocytes")
+test = sapply(pathway_strs, test_pathways, "hepatocytes 1", "hepatocytes 2")
+
 ```
 
 ### Theta analysis
+
+```{r}
+pp = filter(phis_seed_avg, cell == "periportal hepatocytes")
+plot(pp$theta, pp$phi)
+
+pc = filter(phis_seed_avg, cell == "pericentral hepatocytes")
+plot(pc$theta, pc$phi)
+```
 
 ```{r}
 #Let's look at theta from when phi is calculable or from where double_freq_amplitude > V_2w_floor:

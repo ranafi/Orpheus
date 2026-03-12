@@ -1,0 +1,3586 @@
+---
+title: "Orpheus on AD ROSMAP data"
+format: html
+editor: visual
+---
+
+### Read in and process exc3.5 cells
+
+```{r}
+library(tidyverse)
+library(Seurat)
+library(SeuratDisk)
+library(Matrix)
+library(doParallel)
+
+#Run once, save results then from now on read in combined obj
+# file = c("../examples/exc35_ctl.h5Seurat")
+# seurat_obj_ctl = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
+# file = c("../examples/exc35_ad.h5Seurat")
+# seurat_obj_ad = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
+# 
+# combined <- merge(
+#   x = seurat_obj_ctl,
+#   y = seurat_obj_ad,
+#   add.cell.ids = c("ctl", "ad")
+# )
+# 
+# # Identify mitochondrial genes
+# mt_genes <- grep("^MT-", rownames(combined), value = TRUE)
+# # Subset to exclude them
+# combined <- combined[!rownames(combined) %in% mt_genes, ]
+# 
+# combined$orig.ident = combined$individualID
+# 
+# VlnPlot(combined, features = "nCount_RNA", group.by = "state")
+# 
+# SaveH5Seurat(combined, "~/Desktop/exc35_ctl_ad_combined.h5Seurat", overwrite = FALSE, verbose = TRUE)
+
+file = c("exc35_ctl_ad_combined.h5Seurat")
+seurat_obj = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
+
+
+s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA" )
+
+orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$cond_cogdx), grouping_var = "cond_cogdx")
+
+# save(orpheus_inputs, file = "exc35_ctl_ad_pb_var_list.RData")
+```
+
+### Load pb and var list
+
+```{r}
+load("exc35_ctl_ad_pb_var_list.RData")
+```
+
+### Custom Cycling functions to account for batch, sex, pmi
+
+```{r}
+
+is_cycling_custom <- function(times, pb_mat, meta_data, time_units = "hrs") {
+  cat("\nRunning is_cycling()")
+  
+  gene1 = t(pb_mat)  # transpose: subjects x genes
+  
+  if (time_units == "hrs") {
+    cat("\nConverting hours to radians")
+    times1 = times / 12 * pi
+  } else {
+    cat("\nAssuming times are already in radians (0–2π)")
+    times1 = times
+  }
+  
+  batches = meta_data$batch_bin[match(colnames(pb_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.factor()
+  pmi = meta_data$pmi[match(colnames(pb_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.numeric()
+  sex = meta_data$sex[match(colnames(pb_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.factor()
+  
+  has_batches <- nlevels(batches) > 1
+  cat(paste0("\nDetected ", nlevels(batches), " batch levels; ",
+             ifelse(has_batches, "including batch in model.", "excluding batch.")))
+  
+  all_genes = foreach(gene_i = 1:ncol(gene1), .combine = rbind) %dopar% {
+    gexp1 = as.numeric(unlist(gene1[, gene_i]))
+    Gene_Symbols = colnames(gene1)[gene_i]
+    
+    # Skip genes with no variance
+    if (all(gexp1 == 0) || sd(gexp1) == 0) {
+      return(c(Gene_Symbols, rep(NA, 12)))
+    }
+    
+    if (has_batches) {
+      partial_model = lm(gexp1 ~ batches + pmi + sex)
+      full_model = lm(gexp1 ~ sin(times1) + cos(times1) + batches + pmi + sex)
+      design_matrix <- model.matrix(gexp1 ~ sin(times1) + cos(times1) + batches + pmi + sex)
+    } else {
+      partial_model = lm(gexp1 ~ pmi + sex)
+      full_model = lm(gexp1 ~ sin(times1) + cos(times1) + pmi + sex)
+      design_matrix <- model.matrix(gexp1 ~ sin(times1) + cos(times1) + pmi + sex)
+    }
+    
+    anova_results = anova(partial_model, full_model)
+    sin_coff = full_model$coefficients[["sin(times1)"]]
+    cos_coeff = full_model$coefficients[["cos(times1)"]]
+    acrophase_bulk = atan2(sin_coff, cos_coeff) %% (2 * pi)
+    amplitude_bulk = sqrt(sin_coff^2 + cos_coeff^2)
+    p_statistic = anova_results$`Pr(>F)`[2]
+    mesor_bulk = mean(design_matrix[, -c(2, 3)] %*% full_model$coefficients[-c(2, 3)])
+    amp_ratio = amplitude_bulk / mesor_bulk
+    
+    partial_model_AIC = AIC(partial_model)
+    full_model_AIC = AIC(full_model)
+    partial_model_BIC = BIC(partial_model)
+    full_model_BIC = BIC(full_model)
+    
+    pb_batch_coeff = if (has_batches) {
+      full_model$coefficients[grep("batches", names(full_model$coefficients))]
+      }else{
+      NA
+    }
+    
+    cbind(Gene_Symbols, acrophase_bulk, amplitude_bulk, p_statistic, amp_ratio,
+          sin_coff, cos_coeff, mesor_bulk,
+          partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC, pb_batch_coeff)
+  }
+  
+  all_genes = as_tibble(all_genes) %>% drop_na(-pb_batch_coeff)
+  all_genes$BHQ = p.adjust(as.numeric(all_genes$p_statistic), "BH")
+  all_genes$Bonf = p.adjust(as.numeric(all_genes$p_statistic), "bonferroni")
+  return(all_genes)
+}
+
+var_cycling_custom <- function(times, var_mat, mean_mat, phase_pb, meta_data, time_units = "hrs") {
+  `%do%` <- foreach::`%do%`
+  cat("\nRunning var_cycling()")
+  
+  gene1 = t(var_mat)
+  means1 = t(mean_mat)
+  
+  if (time_units == "hrs") {
+    cat("\nConverting hours to radians")
+    times1 = times / 12 * pi
+  } else {
+    cat("\nAssuming times are already in radians (0–2π)")
+    times1 = times
+  }
+  
+  batches = meta_data$batch_bin[match(colnames(mean_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.factor()
+  pmi = meta_data$pmi[match(colnames(mean_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.numeric()
+  sex = meta_data$sex[match(colnames(mean_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.factor()
+  
+  has_batches <- nlevels(batches) > 1
+  cat(paste0("\nDetected ", nlevels(batches), " batch levels; ",
+             ifelse(has_batches, "including batch in model.", "excluding batch.")))
+  
+  all_genes = foreach(gene_i = 1:ncol(gene1), .combine = rbind) %do% {
+    gexp1 = as.numeric(unlist(gene1[, gene_i]))
+    m1 = as.numeric(unlist(means1[, gene_i]))
+    Gene_Symbols = colnames(gene1)[gene_i]
+    phase_bulk = as.numeric(phase_pb[gene_i])
+    
+    if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
+      return(c(Gene_Symbols, rep(NA, 12)))
+    }
+    
+    if (has_batches) {
+      partial_model = lm(gexp1 ~ m1 + batches + pmi + sex)
+      full_model = lm(gexp1 ~ sin(2 * times1) + cos(2 * times1) + m1 + batches + pmi + sex)
+      design_matrix <- model.matrix(gexp1 ~ sin(2 * times1) + cos(2 * times1) + m1 + batches + pmi + sex)
+    } else {
+      partial_model = lm(gexp1 ~ m1 + pmi + sex)
+      full_model = lm(gexp1 ~ sin(2 * times1) + cos(2 * times1) + m1 + pmi + sex)
+      design_matrix <- model.matrix(gexp1 ~ sin(2 * times1) + cos(2 * times1) + m1 + pmi + sex)
+    }
+    
+    anova_results = anova(partial_model, full_model)
+    sin_coff = full_model$coefficients[["sin(2 * times1)"]]
+    cos_coeff = full_model$coefficients[["cos(2 * times1)"]]
+    double_freq_acrophase = atan2(sin_coff, cos_coeff) %% (2 * pi) / 2
+    
+    find_Af = if (has_batches){
+      lm(full_model$coefficients[["m1"]] * m1 ~ cos(times1) + sin(times1) + batches + pmi + sex)
+    }else{
+      lm(full_model$coefficients[["m1"]] * m1 ~ cos(times1) + sin(times1) + pmi + sex)
+    }
+      
+    fund_amp = sqrt(find_Af$coefficients[["sin(times1)"]]^2 +
+                    find_Af$coefficients[["cos(times1)"]]^2)
+    fund_acro = atan2(find_Af$coefficients[["sin(times1)"]],
+                      find_Af$coefficients[["cos(times1)"]]) %% (2 * pi)
+    
+    double_freq_p_statistic = anova_results$`Pr(>F)`[2]
+    raw_2w_amp = sqrt(sin_coff^2 + cos_coeff^2)
+    double_freq_amplitude = -cos_coeff * cos(2 * phase_bulk) - sin_coff * sin(2 * phase_bulk)
+    var_mesor = mean(design_matrix[, -c(2, 3)] %*% full_model$coefficients[-c(2, 3)])
+    
+    partial_model_AIC = AIC(partial_model)
+    full_model_AIC = AIC(full_model)
+    partial_model_BIC = BIC(partial_model)
+    full_model_BIC = BIC(full_model)
+    
+    var_batch_coeff = if (has_batches) {
+      full_model$coefficients[grep("batches", names(full_model$coefficients))]
+      }else{
+      NA
+    }
+    
+    cbind(Gene_Symbols, double_freq_acrophase, double_freq_amplitude,
+          double_freq_p_statistic, fund_amp, fund_acro, var_mesor,
+          partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC, raw_2w_amp, var_batch_coeff)
+  }
+  
+  all_genes = as_tibble(all_genes) %>% drop_na(-var_batch_coeff)
+  all_genes$BHQ = p.adjust(as.numeric(all_genes$double_freq_p_statistic), "BH")
+  all_genes$Bonf = p.adjust(as.numeric(all_genes$double_freq_p_statistic), "bonferroni")
+  return(all_genes)
+}
+
+var_cycling_custom_fixed_acro <- function(times, var_mat, mean_mat, phase_pb, meta_data, time_units = "hrs") {
+  cat("\nRunning var_cycling_fixed_acro()")
+  
+  gene1 = t(var_mat)
+  means1 = t(mean_mat)
+  
+  if (time_units == "hrs") {
+    cat("\nConverting hours to radians")
+    times1 = times / 12 * pi
+  } else {
+    cat("\nAssuming times are already in radians (0–2π)")
+    times1 = times
+  }
+  
+  batches = meta_data$batch_bin[match(colnames(mean_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.factor()
+  pmi = meta_data$pmi[match(colnames(mean_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.numeric()
+  sex = meta_data$sex[match(colnames(mean_mat), meta_data$individualID)] %>%
+    unname() %>% unlist() %>% as.factor()
+  
+  has_batches <- nlevels(batches) > 1
+  cat(paste0("\nDetected ", nlevels(batches), " batch levels; ",
+             ifelse(has_batches, "including batch in model.", "excluding batch.")))
+  
+  all_genes = foreach(gene_i = 1:ncol(gene1), .combine = rbind) %dopar% {
+    gexp1 = as.numeric(unlist(gene1[, gene_i]))
+    m1 = as.numeric(unlist(means1[, gene_i]))
+    Gene_Symbols = colnames(gene1)[gene_i]
+    phase_bulk = as.numeric(phase_pb[gene_i])
+    
+    if (all(m1 == 0) || all(gexp1 == 0) || sd(m1) == 0 || sd(gexp1) == 0) {
+      return(c(Gene_Symbols, rep(NA, 10)))
+    }
+    double_wave = cos(2 * (times1- pi/2 - phase_bulk))
+
+    if (has_batches) {
+      partial_model = lm(gexp1 ~ m1 + batches + pmi + sex)
+      full_model = lm(gexp1 ~ double_wave + m1 + batches + pmi + sex)
+      design_matrix <- model.matrix(gexp1 ~ double_wave + m1 + batches + pmi + sex)
+    } else {
+      partial_model = lm(gexp1 ~ m1 + pmi + sex)
+      full_model = lm(gexp1 ~ double_wave + m1 + pmi + sex)
+      design_matrix <- model.matrix(gexp1 ~ double_wave + m1 + pmi + sex)
+    }
+    
+    anova_results = anova(partial_model, full_model)
+    
+    
+    find_Af = if (has_batches){
+      lm(full_model$coefficients[["m1"]] * m1 ~ cos(times1-phase_bulk) + batches + pmi + sex)
+    }else{
+      lm(full_model$coefficients[["m1"]] * m1 ~ cos(times1-phase_bulk) + pmi + sex)
+    }
+    fund_mean_coeff = full_model$coefficients[["m1"]]
+    fund_amp = find_Af$coefficients[["cos(times1 - phase_bulk)"]]
+    
+    double_freq_p_statistic = anova_results$`Pr(>F)`[2]
+    double_freq_amplitude = full_model$coefficients[["double_wave"]]
+    var_mesor = mean(design_matrix[,-2] %*% full_model[["coefficients"]][-2])
+    
+    partial_model_AIC = AIC(partial_model)
+    full_model_AIC = AIC(full_model)
+    partial_model_BIC = BIC(partial_model)
+    full_model_BIC = BIC(full_model)
+    
+     var_batch_coeff = if (has_batches) {
+      full_model$coefficients[grep("batches", names(full_model$coefficients))]
+      }else{
+      NA
+    }
+    
+    cbind(Gene_Symbols, double_freq_amplitude,
+          double_freq_p_statistic, fund_amp, var_mesor,
+          partial_model_AIC, full_model_AIC, partial_model_BIC, full_model_BIC, fund_mean_coeff, var_batch_coeff)
+  }
+  
+  all_genes = as_tibble(all_genes) %>% drop_na(-var_batch_coeff)
+  all_genes$BHQ = p.adjust(as.numeric(all_genes$double_freq_p_statistic), "BH")
+  all_genes$Bonf = p.adjust(as.numeric(all_genes$double_freq_p_statistic), "bonferroni")
+  return(all_genes)
+}
+```
+
+### Run ORPHEUS for each group with custom cycling functions
+
+```{r}
+#In this loop I will need meta.data from s_obj, first I need to make sure all the times, batch_bin, and pmi, sex are equal among individual_ID:
+# s_obj@meta.data %>%
+#   group_by(individualID) %>%
+#   summarise(
+#     across(c(batch_bin, sex, pmi, times, cond_cogdx), ~n_distinct(.x))
+#   )
+
+#Since assumption is correct, this code below correctly gets metadata for each subject:
+# subject_meta <- s_obj@meta.data %>%
+#   group_by(individualID) %>%
+#   summarise(
+#     batch_bin = first(batch_bin),
+#     sex = first(sex),
+#     pmi = first(pmi),
+#     times = first(times),
+#     cond = first(cond_cogdx)
+#   )
+# save(subject_meta, file = "./figures/rosmap_exc35/subject_meta_cogdx.RData")
+load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+cluster_phis = list()
+for(cell_type in names(orpheus_inputs)){
+  
+print(paste("Analyzing condition", cell_type))
+
+
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Variance of NB is var = mean + mean^2*theta
+#rearrange to solve for theta = (var-mean)/mean^2
+time_wise_theta_meas <- as.data.frame(mapply(function(v,m){(v-m)/m^2}, var_mat, pb_mat))
+rownames(time_wise_theta_meas) = rownames(pb_mat)
+colnames(time_wise_theta_meas) = paste0(colnames(time_wise_theta_meas), "_theta_meas")
+
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
+
+
+
+# times = s_obj$times[match(colnames(pb_mat), s_obj$individualID)] %>% unname %>% unlist
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+# stopifnot(all.equal(times, meta_data$times))
+
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat, meta_data, time_units = "rads")
+# write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+
+stopifnot(all(pb_cycling_custom$Gene_Symbols == rownames(var_mat)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat, mean_mat = pb_mat, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+# plot_rhythms(times, var_mat, pb_mat, plot_me = c("RPS28", "ATP6V0C"), time_units = "rads", line_color = "black", point_color = "skyblue", point_size = 2)
+
+bulk_thr_cutoff = 0.5
+
+input_cos_cust = var_cyclers_cust %>% 
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+
+```
+
+### Combine results into single df
+
+```{r}
+cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+# save(cos_phis_tmm, file = "~/Desktop/phis_exc35_ad_ctl.RData")
+```
+
+### Plotting
+
+```{r}
+load("./figures/rosmap_exc35/phis_exc35_ad_ctl.RData")
+library(ggpubr)
+library(ggrepel)
+library(tidyverse)
+
+
+cos_phis_filt = filter(cos_phis_tmm, !is.na(phi))
+
+clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2", "HLF", "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
+oxphos = c("ATP12A", "ATP4A", "ATP4B", "ATP5F1A", "ATP5F1B", "ATP5F1C", "ATP5F1D", "ATP5F1E", "ATP5MC1", "ATP5MC1P5",
+"ATP5MC2", "ATP5MC3", "ATP5ME", "ATP5MF", "ATP5MG", "ATP5PB", "ATP5PD", "ATP5PF", "ATP5PO", "ATP6AP1",
+"ATP6V0A1", "ATP6V0A2", "ATP6V0A4", "ATP6V0B", "ATP6V0C", "ATP6V0D1", "ATP6V0D2", "ATP6V0E1", "ATP6V0E2",
+"ATP6V1A", "ATP6V1B1", "ATP6V1B2", "ATP6V1C1", "ATP6V1C2", "ATP6V1D", "ATP6V1E1", "ATP6V1E2", "ATP6V1F",
+"ATP6V1G1", "ATP6V1G2", "ATP6V1G3", "ATP6V1H", "COX10", "COX11", "COX15", "COX17", "COX4I1", "COX4I2",
+"COX5A", "COX5B", "COX6A1", "COX6A2", "COX6B1", "COX6B2", "COX6C", "COX6CP3", "COX7A1", "COX7A2",
+"COX7A2L", "COX7B", "COX7B2", "COX7C", "COX8A", "COX8C", "CYC1", "LHPP", "MT-ATP6", "MT-ATP8",
+"MT-CO1", "MT-CO2", "MT-CO3", "MT-CYB", "MT-ND1", "MT-ND2", "MT-ND3", "MT-ND4", "MT-ND4L", 
+"MT-ND5", "MT-ND6", "NDUFA1", "NDUFA10", "NDUFA11", "NDUFA2", "NDUFA3", "NDUFA4", "NDUFA4L2",
+"NDUFA5", "NDUFA6", "NDUFA7", "NDUFA8", "NDUFA9", "NDUFAB1", "NDUFB1", "NDUFB10", "NDUFB2",
+"NDUFB3", "NDUFB4", "NDUFB5", "NDUFB6", "NDUFB7", "NDUFB8", "NDUFB9", "NDUFC1", "NDUFC2",
+"NDUFS1", "NDUFS2", "NDUFS3", "NDUFS4", "NDUFS5", "NDUFS6", "NDUFS7", "NDUFS8", "NDUFV1",
+"NDUFV2", "NDUFV3", "PPA1", "PPA2", "SDHA", "SDHB", "SDHC", "SDHCP5", "SDHD", "TCIRG1",
+"UQCR10", "UQCR10P1", "UQCR11", "UQCRB", "UQCRC1", "UQCRC2", "UQCRFS1", "UQCRH", "UQCRHL", "UQCRQ")
+
+
+ribo_genes = cos_phis_filt$Row.names[grep("RP[SL]", cos_phis_filt$Row.names)]
+
+
+cos_phis_filt$clock_genes <- ifelse(toupper(cos_phis_filt$Row.names) %in% clock_genes, cos_phis_filt$Row.names, NA)
+
+cos_phis_filt$oxphos_genes <- ifelse(toupper(cos_phis_filt$Row.names) %in% oxphos, cos_phis_filt$Row.names, NA)
+
+cos_phis_filt$ribo_genes <- ifelse(toupper(cos_phis_filt$Row.names) %in% ribo_genes, cos_phis_filt$Row.names, NA)
+
+# Perform the Wilcoxon Rank Sum test
+wilcox_result <- wilcox.test(phi ~ Source, data = cos_phis_filt)
+print(wilcox_result)
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+
+# Define a colorpallete
+color_palette <- c("0" = "skyblue", "1" = "salmon")
+
+# Create the plot
+p <- ggplot(cos_phis_filt, aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7.5, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "Phase Dispersion is Increased in AD Neurons",
+    y = "Phase Dispersion (hrs)",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+    scale_y_continuous(breaks = c(0,2,4,6,8))+
+  ylim(c(0,8))
+
+median_df <- cos_phis_filt %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE)*12/pi)
+
+p <- p+geom_text(
+  data = median_df,
+  aes(x = Source, y = median_phi, label = round(median_phi, 2)),
+  vjust = 1.5,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+# Display the plot
+print(p)
+ggsave("~/Desktop/phi_boxplot_NOTmatched.pdf",p, device = "pdf", width = 5, height = 5 )
+
+############## PAIRWISE BOXPLOT #################
+df_matched <- cos_phis_filt %>%
+  group_by(Row.names) %>%
+  filter(n_distinct(Source) == 2) %>%
+  ungroup()
+
+
+matched_phi_boxplot = ggplot(df_matched, aes(Source, phi*12/pi, fill = Source))+
+ geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Condition")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 10, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  ) +
+  scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))
+
+ggsave("~/Desktop/matched_phi_boxplot.pdf",matched_phi_boxplot, device = "pdf", width = 5, height = 5 )
+
+
+matches_Ac_boxplot = ggplot(df_matched, aes(Source, log(Ac), fill = Source))+
+ geom_boxplot(outlier.shape = NA)+
+  theme_minimal()+
+  xlab("Condition")+
+  ylab("Log(cell rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = color_palette) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )+
+  scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))
+
+
+ggsave("~/Desktop/matched_Ac_boxplot.pdf",matches_Ac_boxplot, device = "pdf", width = 5, height = 5 )
+
+matches_pbAmp_boxplot = ggplot(df_matched, aes(Source, log(as.numeric(amplitude_bulk)), fill = Source))+
+ geom_boxplot(outliers  = F)+
+  theme_minimal()+
+  xlab("Condition")+
+  ylab("Log(PB rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = color_palette) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )+
+  scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))
+
+ggsave("~/Desktop/matched_pbAmp_boxplot.pdf",matches_pbAmp_boxplot, device = "pdf", width = 5, height = 5 )
+
+
+# Scatter plot showing matched phis, as opposed to boxplot:
+# Calculate summary statistics for annotation
+
+comparison <- df_matched %>%
+  group_by(Row.names) %>%
+  summarise(
+    diff = phi[Source == "1"] - phi[Source == "0"]
+  ) %>%
+  mutate(
+    higher_in = case_when(
+      diff > 0 ~ "AD_higher",
+      diff < 0 ~ "CTL_higher",
+      TRUE ~ "equal"
+    ))
+
+num_genes <- nrow(comparison)
+num_increased = table(comparison$higher_in)["AD_higher"]
+percent_increased <- round(100 * num_increased / num_genes, 1)
+
+merged_phi_wilcox_test = wilcox.test(phi ~ Source, data = df_matched, paired = T)
+
+# Create a text label for the plot
+stats_label <- sprintf(
+  "Paired Wilcoxon, p = %.2e\n%d / %d genes (%s%%) genes increase phase disp. in AD",
+  merged_phi_wilcox_test$p.value,
+  num_increased,
+  num_genes,
+  percent_increased
+)
+
+# Find limits for a square plot
+max_val <- max(df_matched$phi*12/pi, na.rm = TRUE) * 1.1
+
+df_matched_wide<- df_matched %>%
+  select(Row.names, phi, Source) %>%
+  pivot_wider(
+    names_from = Source,
+    values_from = phi,
+    names_prefix = "phi_"
+  )
+
+p_scatter <- ggplot(df_matched_wide, aes(x = phi_0*12/pi, y = phi_1*12/pi)) +
+  # The line of identity (y=x). This is the most important reference.
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  # The data points. Use some transparency.
+  geom_point(alpha = 0.4, size = 2.5, color = "grey50") + # Using the AD color from before
+  # Add the statistical annotation
+  # Place it in a corner of the plot
+  annotate(
+    "text", 
+    x = 0, 
+    y = max_val, 
+    label = stats_label, 
+    hjust = 0, 
+    vjust = 1, 
+    size = 3,
+    fontface = "bold"
+  ) +
+  # Force the plot to be square for easy comparison to the y=x line
+  coord_fixed(xlim = c(0, max_val), ylim = c(0, max_val)) +
+  # Labels and theme
+  labs(
+    title = "Systematic Increase in Phase Dispersion in AD Neurons",
+    x = "Phase Dispersion (hrs) in CTL",
+    y = "Phase Dispersion (hrs) in AD"
+  ) +
+  theme_bw()+
+  theme(
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )
+
+print(p_scatter)
+ggsave("~/Desktop/matched_phi_scatter.pdf", plot = p_scatter, device = "pdf", width = 5, height = 5)
+
+
+#OXPHOS boxplots:
+# Create the plot
+oxphos_df = filter(cos_phis_filt, !is.na(oxphos_genes))
+
+oxphos_phis_plot <- ggplot(oxphos_df, aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 5, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "OXPHOS Phase Dispersion is Increased in AD Neurons",
+    y = "Phase Dispersion (hrs)",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+    scale_y_continuous(breaks = c(0,2,4,6,8))+
+  ylim(c(0,6))+
+  ggrepel::geom_text_repel(label = oxphos_df$Row.names, min.segment.length = 1)
+
+oxphos_median_df <- oxphos_df %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE)*12/pi)
+
+oxphos_phis_plot <- oxphos_phis_plot+geom_text(
+  data = oxphos_median_df,
+  aes(x = Source, y = median_phi, label = round(median_phi, 2)),
+  vjust = -.3,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+ggsave("~/Desktop/rosmap_exc35_oxphosGenes_phi_w_labels.pdf",plot = oxphos_phis_plot, width =5, height = 5)
+
+####
+oxphos_pb_plot <- ggplot(oxphos_df, aes(x = Source, y = amplitude_bulk, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = amplitude_bulk), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7.5, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "OXPHOS Bulk Amplitude",
+    y = "PB Amp",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+    scale_y_continuous(breaks = c(0,2,4,6,8))+
+  ylim(c(0,6))+
+  ggrepel::geom_text_repel(label = oxphos_df$Row.names, min.segment.length = 1)
+
+
+oxphos_median_df_pb <- oxphos_df %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_pb_amp = median(amplitude_bulk, na.rm = TRUE))
+
+oxphos_pb_plot <- oxphos_pb_plot+geom_text(
+  data = oxphos_median_pb,
+  aes(x = Source, y = median_pb_amp, label = round(median_pb_amp, 2)),
+  vjust = -0.3,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+ggsave("~/Desktop/rosmap_exc35_oxphosGenes_PBamp_w_labels.pdf",plot = oxphos_pb_plot,  width = 5, height =5)
+
+#####
+oxphos_Ac_plot <- ggplot(oxphos_df, aes(x = Source, y = Ac, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = Ac), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 5, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "OXPHOS Amplitude Cellular",
+    y = "Ac",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+    scale_y_continuous(breaks = c(0,2,4,6,8))+
+  ylim(c(0,7)) + ggrepel::geom_text_repel(label = oxphos_df$Row.names, min.segment.length = 1)
+
+
+oxphos_median_df_ac <- oxphos_df %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_Ac = median(Ac, na.rm = TRUE))
+
+oxphos_Ac_plot <- oxphos_Ac_plot+geom_text(
+  data = oxphos_median_df_ac,
+  aes(x = Source, y = median_Ac, label = round(median_Ac, 2)),
+  vjust = 0,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+ggsave("~/Desktop/rosmap_exc35_oxphosGenes_Ac_w_labels.pdf", plot = oxphos_Ac_plot, width = 5, height = 5)
+
+####
+#Ribosome genes
+ribo_df = filter(cos_phis_filt, !is.na(ribo_genes))
+
+ribo_phis_plot <- ggplot(ribo_df, aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7.5, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "RIBO Phase Dispersion is Increased in AD Neurons",
+    y = "PB amplitude",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+    scale_y_continuous(breaks = c(0,2,4,6,8))+
+  ylim(c(0,8)) #+ ggrepel::geom_text_repel(label = ribo_df$Row.names, min.segment.length = 1)
+
+ribo_median_df <- ribo_df %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE)*12/pi)
+
+ribo_phis_plot <- ribo_phis_plot+geom_text(
+  data = ribo_median_df,
+  aes(x = Source, y = median_phi, label = round(median_phi, 2)),
+  vjust = -.2,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+ggsave("~/Desktop/rosmap_exc35_riboGenes_w_labels.pdf", plot = ribo_phis_plot, width = 5, height = 5)
+#####
+
+ribo_pb_plot <- ggplot(ribo_df, aes(x = Source, y = amplitude_bulk, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = amplitude_bulk), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7.5, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "RIBO Amplitude Bulk",
+    y = "PB amplitude",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+    scale_y_continuous(breaks = c(0,2,4,6,8))+
+  ylim(c(0,2)) + ggrepel::geom_text_repel(label = ribo_df$Row.names, min.segment.length = 1)
+
+ribo_median_df_pb <- ribo_df %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_pb = median(amplitude_bulk, na.rm = TRUE))
+
+ribo_pb_plot <- ribo_pb_plot + geom_text(
+  data = ribo_median_df_pb,
+  aes(x = Source, y = median_pb, label = round(median_pb, 2)),
+  vjust = -.2,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+ggsave("~/Desktop/rosmap_exc35_riboGenes_PBamp_w_labels.pdf", plot = ribo_pb_plot, width = 5, height = 5)
+
+######
+ribo_Ac_plot <- ggplot(ribo_df, aes(x = Source, y = Ac, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = Ac), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7.5, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "RIBO Amplitude Cellular",
+    y = "Ac",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+    scale_y_continuous(breaks = c(0,2,4,6,8))+
+  ylim(c(0,8)) + ggrepel::geom_text_repel(label = ribo_df$Row.names, min.segment.length = 1)
+
+ribo_median_df_Ac <- ribo_df %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_Ac = median(Ac, na.rm = TRUE))
+
+ribo_Ac_plot <- ribo_Ac_plot + geom_text(
+  data = ribo_median_df_Ac,
+  aes(x = Source, y = median_Ac, label = round(median_Ac, 2)),
+  vjust = -.2,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+ggsave("~/Desktop/rosmap_exc35_riboGenes_Ac_w_labels.pdf", plot = ribo_Ac_plot, width = 5, height = 5)
+
+```
+
+#### plot example gene traces
+
+```{r}
+load("exc35_ctl_ad_pb_var_list.RData")
+
+load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
+cell_type = "1"
+
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+
+
+plot_rhythms(times = times, var_mat = var_mat, mean_mat = pb_mat, plot_me = c("PHYHIP"), time_units = "rads", line_color = "salmon", point_color = "grey32", point_size = 2)
+
+
+cell_type = "0"
+
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+
+
+plot_rhythms(times = times, var_mat = var_mat, mean_mat = pb_mat, plot_me = c("RIT2"), time_units = "rads", line_color = "skyblue", point_color = "grey32", point_size = 2)
+```
+
+#### Create acrophase histograms by finding significant 24hr and 12hr rhythms without priors about where they should be:
+
+```{r}
+
+load("exc35_ctl_ad_pb_var_list.RData")
+load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+# This ensures stopCluster runs even if the code below crashes!
+on.exit(stopCluster(cl))
+
+acrodiffs = list()
+for(cell_type in names(orpheus_inputs)){
+  
+print(paste("Analyzing condition", cell_type))
+
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat, meta_data, time_units = "rads")
+
+stopifnot(all(pb_cycling_custom$Gene_Symbols == rownames(var_mat)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom(times, var_mat = var_mat, mean_mat = pb_mat, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+
+# bulk_thr_cutoff = 0.5
+
+input_cos_cust = var_cyclers_cust %>% 
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+
+local_res =  list("tmm" = input_cos_cust)
+names(local_res) = cell_type
+acrodiffs <- append(acrodiffs, list(local_res))
+}
+
+stopCluster(cl)
+
+
+acrodiffs_df <- do.call(rbind, lapply(seq_along(acrodiffs), function(source_name) {
+  current_df <- acrodiffs[[source_name]][[1]]
+  current_df$Source <- names(acrodiffs[[source_name]][1])
+  current_df
+}))
+
+
+color_palette <- c("0" = "skyblue", "1" = "salmon")
+
+acrodiff_compare_AD = ggplot(filter(acrodiffs_df, Source =="1"), aes(x = acrodiff*12/pi, fill = Source)) +
+  geom_histogram(binwidth = 2, color = "black", alpha = 1,  breaks = seq(0, 12, by = 2)) +
+  #facet_wrap(~ as.factor(Source), scales = "free_y", labeller = as_labeller(c("0" = "CTL", "1" = "AD"))) +
+  scale_fill_manual(values = color_palette) +
+  guides(fill = "none") +    # remove fill legend
+  xlab("abs(24hr PB acro - 12hr Var acro)(hrs)")+
+  ylab("Count")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+
+   # Use scale_x_continuous for precise control over the x-axis
+  scale_x_continuous(
+    limits = c(0, 12),
+    breaks = seq(0, 12, by = 3)
+  )+ggtitle("AD")
+
+# ggsave("~/Desktop/rosmap_exc35_ad_acrodiff.pdf", acrodiff_compare_AD, width = 5, height = 3)
+
+acrodiff_compare_CTL = ggplot(filter(acrodiffs_df, Source =="0"), aes(x = acrodiff*12/pi, fill = Source)) +
+  geom_histogram(binwidth = 2, color = "black", alpha = 1,  breaks = seq(0, 12, by = 2)) +
+  #facet_wrap(~ as.factor(Source), scales = "free_y", labeller = as_labeller(c("0" = "CTL", "1" = "AD"))) +
+  scale_fill_manual(values = color_palette) +
+  guides(fill = "none") +    # remove fill legend
+  xlab("abs(24hr PB acro - 12hr Var acro)(hrs)")+
+  ylab("Count")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+
+   # Use scale_x_continuous for precise control over the x-axis
+  scale_x_continuous(
+    limits = c(0, 12),
+    breaks = seq(0, 12, by = 3)
+  )+ggtitle("CTL")
+
+# ggsave("~/Desktop/rosmap_exc35_ctl_acrodiff.pdf", acrodiff_compare_CTL, width = 5, height = 3)
+```
+
+### Write out RNK files:
+
+```{r}
+
+out_rnk = data.frame(Gene_Symbols = df_matched_wide$Row.names,
+                     metric = df_matched_wide$phi_0 - df_matched_wide$phi_1) %>% arrange(metric)
+
+write.table(out_rnk, file = "~/Desktop/rosmap_exc35_ctlPhiMinusADPhi.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+df_Ac_matched<- df_matched %>%
+  select(Row.names, Ac, Source) %>%
+  pivot_wider(
+    names_from = Source,
+    values_from = Ac,
+    names_prefix = "Ac_"
+  )
+out_Ac_rnk = data.frame(Gene_Symbols = df_Ac_matched$Row.names,
+                     metric = df_Ac_matched$Ac_0 - df_Ac_matched$Ac_1) %>% arrange(metric)
+
+write.table(out_Ac_rnk, file = "~/Desktop/rosmap_exc35_ctlAcMinusADAc.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+load("./figures/rosmap_exc35/phis_exc35_ad_ctl.RData")
+cos_phis_filt = filter(cos_phis_tmm, !is.na(phi))
+
+
+AD_phis = filter(cos_phis_filt, Source == "1")
+
+AD_rnk = data.frame(Gene_Symbols = AD_phis$Row.names,
+                    metric = AD_phis$phi) %>% arrange(metric)
+write.table(AD_rnk, file = "~/Desktop/rosmap_exc35_ADphi.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+AD_ac_rnk = data.frame(Gene_Symbols = AD_phis$Row.names,
+                    metric = AD_phis$Ac) %>% arrange(metric)
+write.table(AD_ac_rnk, file = "~/Desktop/rosmap_exc35_AD_Ac_ranked.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+CTL_phis = filter(cos_phis_filt, Source == "0")
+
+CTL_rnk = data.frame(Gene_Symbols = CTL_phis$Row.names,
+                    metric = CTL_phis$phi) %>% arrange(metric)
+write.table(CTL_rnk, file = "~/Desktop/rosmap_exc35_CTLphi.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+CTL_ac_rnk = data.frame(Gene_Symbols = CTL_phis$Row.names,
+                    metric = CTL_phis$Ac) %>% arrange(metric)
+write.table(CTL_ac_rnk, file = "~/Desktop/rosmap_exc35_CTL_Ac_ranked.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+```
+
+### Make GSEA figures:
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+library(dplyr)
+library(msigdbr)
+
+human_kegg <- msigdbr(db_species = "HS", species = "Homo sapiens",
+                      collection = "C2", subcollection = "CP:KEGG_LEGACY") %>% select(gs_name, gene_symbol)
+
+# Read  RNK file
+rnk_df <- read.table("./figures/rosmap_exc35/rnk/rosmap_exc35_ADphi.rnk", header = FALSE)
+
+# Create the named vector
+# Column 2 has the numbers (metric), Column 1 has the genes
+gene_list <- rnk_df$V2
+names(gene_list) <- rnk_df$V1
+
+# Sort in descending order
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Run GSEA
+gsea_res <- GSEA(gene_list, 
+                 TERM2GENE = human_kegg,
+                 pvalueCutoff = 1, 
+                 minGSSize = 5, 
+                 maxGSSize = 500,
+                 seed = TRUE )      # Ensure reproducibility
+
+# You can see them in gsea_res@result$Description
+pathways_to_plot <- c("KEGG_NEUROTROPHIN_SIGNALING_PATHWAY", "KEGG_ENDOCYTOSIS")
+
+# Generate the Mirror Plot
+p <- gseaplot2(gsea_res, 
+          geneSetID = pathways_to_plot, 
+          color = c("mediumorchid", "lightsalmon"), # Red/Blue custom colors
+          pvalue_table = F,             # Show P-values on plot
+          title = "AD samples: genes ranked by phase dispersion",
+          subplots = 1:2,
+          ES_geom = "line",
+          rel_heights = c(6,1))
+ggsave("~/Desktop/pathway_approach1_AD_phis_prettyPlot.pdf", plot = p, height = 4, width = 5)
+
+#Repeat for CTL:
+# Read  RNK file
+rnk_df <- read.table("./figures/rosmap_exc35/rnk/rosmap_exc35_CTLphi.rnk", header = FALSE)
+
+# Create the named vector
+# Column 2 has the numbers (metric), Column 1 has the genes
+gene_list <- rnk_df$V2
+names(gene_list) <- rnk_df$V1
+
+# Sort in descending order
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Run GSEA
+gsea_res <- GSEA(gene_list, 
+                 TERM2GENE = human_kegg,
+                 pvalueCutoff = 1, 
+                 minGSSize = 5, 
+                 maxGSSize = 500,
+                 seed = TRUE )      # Ensure reproducibility
+
+# You can see them in gsea_res@result$Description
+pathways_to_plot <- c("KEGG_OXIDATIVE_PHOSPHORYLATION", "KEGG_ENDOCYTOSIS")
+
+# Generate the Mirror Plot
+p2 <- gseaplot2(gsea_res, 
+          geneSetID = pathways_to_plot, 
+          color = c("mediumorchid", "lightsalmon"), # Red/Blue custom colors
+          pvalue_table = F,             # Show P-values on plot
+          title = "CTL samples: genes ranked by phase dispersion",
+          subplots = 1:2,
+          ES_geom = "line",
+          rel_heights = c(6,1))
+ggsave("~/Desktop/pathway_approach1_CTL_phis_prettyPlot.pdf", plot = p2, height = 4, width = 5)
+
+```
+
+### enrichR:
+
+```{r}
+library(enrichR)
+websiteLive <- getOption("enrichR.live")
+
+dbs <- c("MSigDB_Hallmark_2020", "GO_Biological_Process_2023", "Reactome_2022", "KEGG_2021_Human")
+
+
+AD_phis = read.delim("./figures/rosmap_exc35/rnk/rosmap_exc35_ADphi.rnk", header = F) 
+CTL_phis = read.delim("./figures/rosmap_exc35/rnk/rosmap_exc35_CTLphi.rnk", header = F)
+CTLminusAD = read.delim("./figures/rosmap_exc35/rnk/rosmap_exc35_ctlPhiMinusADPhi.rnk", header = F)
+
+run_enrichR = function(phi_df, dbs, prop = 0.5){
+  websiteLive <- getOption("enrichR.live")
+  
+  top_frac = arrange(phi_df, V2) %>% slice_head(prop = prop) %>% select(V1) %>% unname %>% unlist
+  
+  bottom_frac = arrange(phi_df, V2) %>% slice_tail(prop = prop) %>% select(V1) %>% unname %>% unlist
+  
+  background = phi_df %>% select(V1) %>% unname %>% unlist
+  
+  if (websiteLive) {
+      # Replace 'Rank' with 'Overlap' column, calculated with GMT files
+      synchronized<- enrichr(top_frac, dbs, background = background, include_overlap = TRUE)
+      synchronized_df = do.call(rbind, synchronized) %>% arrange(P.value)
+      synchronized_df$group = "synch"
+      unsynch <-enrichr(bottom_frac, dbs, background = background, include_overlap = TRUE)
+      unsynch_df = do.call(rbind, unsynch) %>% arrange(P.value)
+      unsynch_df$group = "unsynch"
+
+     return(rbind(synchronized_df, unsynch_df))
+  }
+  
+}
+
+AD_phis_enrichR = run_enrichR(AD_phis, dbs, prop = 0.3)
+CTL_phis_enrichR = run_enrichR(CTL_phis,dbs,  prop = 0.3)
+CTLminusAD_phis_enrichR = run_enrichR(CTLminusAD, dbs, prop = 0.3)
+
+```
+
+### Repeat the analysis for CERAD score bins
+
+Lets do this within just the AD folks:
+
+```{r}
+library(Orpheus)
+
+file = c("../examples/exc35_ctl_ad_combined.h5Seurat")
+seurat_obj = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
+
+s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA" )
+
+# s_obj_ad <- subset(s_obj, cond_cogdx == 1)
+
+orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$ceradsc_bin), grouping_var = "ceradsc_bin")
+
+# save(orpheus_inputs, file = "figures/rosmap_exc35/CERAD/AD_subjects_cerad/orpheus_inputs_ceradscbin_pb_var_list_ADsubsOnly.RData")
+
+#this code below correctly gets metadata for each subject:
+subject_meta <- s_obj@meta.data %>%
+  group_by(individualID) %>%
+  summarise(
+    batch_bin = first(batch_bin),
+    sex = first(sex),
+    pmi = first(pmi),
+    times = first(times),
+    cond = first(cond_cogdx)
+  )
+
+cluster_phis = list()
+for(cell_type in names(orpheus_inputs)){
+  
+print(paste("Analyzing condition", cell_type))
+
+
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Variance of NB is var = mean + mean^2*theta
+#rearrange to solve for theta = (var-mean)/mean^2
+time_wise_theta_meas <- as.data.frame(mapply(function(v,m){(v-m)/m^2}, var_mat, pb_mat))
+rownames(time_wise_theta_meas) = rownames(pb_mat)
+colnames(time_wise_theta_meas) = paste0(colnames(time_wise_theta_meas), "_theta_meas")
+
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
+
+
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+#stopifnot(all.equal(times, meta_data$times))
+
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat, meta_data, time_units = "rads")
+# write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+
+stopifnot(all(pb_cycling_custom$Gene_Symbols == rownames(var_mat)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat, mean_mat = pb_mat, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+bulk_thr_cutoff = 0.5
+
+input_cos_cust = var_cyclers_cust %>% 
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+cos_phis_cerad <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+save(cos_phis_cerad, file = "~/Desktop/phis_exc35_ad_ctl_CERAD.RData")
+
+
+#----------- plotting -------------
+library(ggpubr)
+library(ggrepel)
+library(tidyverse)
+
+
+cos_phis_filt = filter(cos_phis_cerad, !is.na(phi))
+
+
+cos_phis_filt$Source = factor(cos_phis_filt$Source,levels = c("[3,5)", "[1,3)"))
+
+# Perform the Wilcoxon Rank Sum test
+wilcox_result <- wilcox.test(phi ~ Source, data = cos_phis_filt)
+print(wilcox_result)
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+
+# Define a colorpallete
+color_palette <- c("[1,3)" = "salmon", "[3,5)" = "skyblue")
+
+# Create the plot
+p <- ggplot(cos_phis_filt, aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("[1,3)", "[3,5)")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 8, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "Phase Dispersion is Increased in AD Neurons",
+    y = "Phase Dispersion (hrs)",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )
+
+median_df <- cos_phis_filt %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE)*12/pi)
+
+p <- p+geom_text(
+  data = median_df,
+  aes(x = Source, y = median_phi, label = round(median_phi, 2)),
+  vjust = 1.5,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+# Display the plot
+print(p)
+ggsave("~/Desktop/phi_boxplot_NOTmatched_CERAD.pdf",p, device = "pdf", width = 5, height = 5 )
+
+############## PAIRWISE BOXPLOT #################
+df_matched <- cos_phis_filt %>%
+  group_by(Row.names) %>%
+  filter(n_distinct(Source) == 2) %>%
+  ungroup()
+
+
+matched_phi_boxplot = ggplot(df_matched, aes(Source, phi*12/pi, fill = Source))+
+ geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Condition")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("[1,3)", "[3,5)")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 8, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  ) 
+
+median_df <- df_matched %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE)*12/pi)
+
+matched_phi_boxplot <-matched_phi_boxplot+geom_text(
+  data = median_df,
+  aes(x = Source, y = median_phi, label = round(median_phi, 2)),
+  vjust = 1.5,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+ggsave("~/Desktop/matched_phi_boxplot_CERAD.pdf",matched_phi_boxplot, device = "pdf", width = 5, height = 5 )
+
+```
+
+### Repeat the analysis for Braaksc bin
+
+```{r}
+library(Orpheus)
+
+file = c("../examples/exc35_ctl_ad_combined.h5Seurat")
+seurat_obj = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
+
+s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA" )
+
+# s_obj_ad <- subset(s_obj, cond_cogdx == 1)
+#rm(s_obj)
+
+orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$braaksc_bin), grouping_var = "braaksc_bin")
+
+# save(orpheus_inputs, file = "~/Desktop/orpheus_inputs_braakscbin_pb_var_list_ADsubsOnly.RData")
+subject_meta <- s_obj@meta.data %>%
+  group_by(individualID) %>%
+  summarise(
+    batch_bin = first(batch_bin),
+    sex = first(sex),
+    pmi = first(pmi),
+    times = first(times),
+    cond = first(cond_cogdx),
+    braaksc_bin = first(braaksc_bin)
+  )
+
+
+
+cluster_phis = list()
+for(cell_type in names(orpheus_inputs)){
+  
+print(paste("Analyzing condition", cell_type))
+
+
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Variance of NB is var = mean + mean^2*theta
+#rearrange to solve for theta = (var-mean)/mean^2
+time_wise_theta_meas <- as.data.frame(mapply(function(v,m){(v-m)/m^2}, var_mat, pb_mat))
+rownames(time_wise_theta_meas) = rownames(pb_mat)
+colnames(time_wise_theta_meas) = paste0(colnames(time_wise_theta_meas), "_theta_meas")
+
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
+
+
+
+# times = s_obj$times[match(colnames(pb_mat), s_obj$individualID)] %>% unname %>% unlist
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+#stopifnot(all.equal(times, meta_data$times))
+times = meta_data$times
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat, meta_data, time_units = "rads")
+# write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+
+stopifnot(all(pb_cycling_custom$Gene_Symbols == rownames(var_mat)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat, mean_mat = pb_mat, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+bulk_thr_cutoff = 0.5
+
+input_cos_cust = var_cyclers_cust %>% 
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+cos_phis_braak <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+save(cos_phis_braak, file = "~/Desktop/phis_exc35_ad_ctl_Braak.RData")
+
+
+#----------- plotting -------------
+library(ggpubr)
+library(ggrepel)
+library(tidyverse)
+
+
+cos_phis_filt = filter(cos_phis_braak, !is.na(phi))
+
+
+cos_phis_filt$Source = factor(cos_phis_filt$Source,levels = c("[0,3)", "[3,5)", "[5,7)"))
+
+# Perform the Kruskal-Wallis test
+kruskal_result <- kruskal.test(phi ~ Source, data = cos_phis_filt)
+print(kruskal_result)
+pairwise_w_test = pairwise.wilcox.test(cos_phis_filt$phi, cos_phis_filt$Source, p.adjust.method = "BH")
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+
+# Define a colorpallete
+color_palette <- c("[0,3)" = "#66C5CC", "[3,5)" = "#F6CF71", "[5,7)" ="#F89C74")
+
+# Create the plot
+p <- ggplot(cos_phis_filt, aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("[5,7)", "[3,5)"),
+                  c("[3,5)", "[0,3)"),
+                  c("[0,3)", "[5,7)")),
+    p.adjust.method = "BH",
+    paired = F,
+    label = "p.signif",             # Display significance levels
+    label.y = c(7.5, 8, 8.5), # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  )+
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  # Add labels and a title
+  labs(
+    title = "Phase Dispersion is Increased in AD Neurons",
+    y = "Phase Dispersion (hrs)",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  ylim(c(0,10))
+
+median_df <- cos_phis_filt %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE)*12/pi)
+
+p <- p+geom_text(
+  data = median_df,
+  aes(x = Source, y = median_phi, label = round(median_phi, 2)),
+  vjust = 1.5,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+# Display the plot
+print(p)
+ggsave("~/Desktop/phi_boxplot_NOTmatched_Braaksc.pdf",p, device = "pdf", width = 5, height = 5 )
+
+############## PAIRWISE BOXPLOT #################
+df_matched <- cos_phis_filt %>%
+  group_by(Row.names) %>%
+  filter(n_distinct(Source) == 2) %>%
+  ungroup()
+
+
+matched_phi_boxplot = ggplot(df_matched, aes(Source, phi*12/pi, fill = Source))+
+ geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Condition")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("[5,7)", "[3,5)")),
+    label = "p.signif",             # Display significance levels
+    label.y = 8, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  )+
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  ) 
+median_df <- df_matched %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE)*12/pi)
+
+matched_phi_boxplot <-matched_phi_boxplot + geom_text(
+  data = median_df,
+  aes(x = Source, y = median_phi, label = round(median_phi, 2)),
+  vjust = 1.5,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+ggsave("~/Desktop/matched_phi_boxplot_Braak.pdf",matched_phi_boxplot, device = "pdf", width = 5, height = 5 )
+
+```
+
+### Pathway Analysis by GSVA
+
+Read in combined counts, aggregate raw counts to subject level, normalize with edgeR, compute the logcpm (which we will give to gsva). Run once, then read in for speed (that is why it is commented out).
+
+```{r}
+library(GSVA)
+library(msigdbr)
+library(edgeR)
+library(SeuratDisk)
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(circular)
+# 
+# file = c("../examples/exc35_ctl_ad_combined.h5Seurat")
+# s_obj = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
+# 
+# subject_meta <- s_obj@meta.data %>%
+#   group_by(individualID) %>%
+#   summarise(
+#     batch_bin = first(batch_bin),
+#     sex = first(sex),
+#     pmi = first(pmi),
+#     times = first(times),
+#     cond = first(cond_cogdx)
+#   )
+
+# #I will take raw counts from seurat, pseudobulk them by cell type and individual, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva:
+# summed_cts = AggregateExpression(s_obj,
+#                            assays = "RNA", 
+#                            layers = "counts", 
+#                            group.by = c("individualID"))
+# summed_cts = summed_cts$RNA
+# 
+# y <- DGEList(counts = summed_cts,group = subject_meta$cond)
+# keep <- filterByExpr(y)
+# y <- y[keep, , keep.lib.sizes = FALSE]
+# y <- calcNormFactors(y, method = "TMM")
+# # Get log-transformed Counts Per Million (logCPM)
+# logcpm_pseudobulk <- cpm(y, log = T)
+# save(logcpm_pseudobulk, file ="../../figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
+```
+
+#### load normed counts for gsva, calculated above:
+
+```{r}
+load("../../figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
+```
+
+#### Get pathways for gsva
+
+```{r}
+
+human_hallmark <- msigdbr(db_species = "HS", species = "Homo sapiens", collection = "H")
+genesets_list <- split(human_hallmark$gene_symbol, human_hallmark$gs_name)
+
+# human_kegg <- msigdbr(db_species = "HS", species = "Homo sapiens",
+#                       collection = "C2", subcollection = "CP:KEGG_LEGACY")
+# genesets_list2 <- split(human_kegg$gene_symbol, human_kegg$gs_name)
+# genesets_list = c(genesets_list, genesets_list2)
+```
+
+#### Read in cycling (in AD and CTL) results (genes with significance values).
+
+```{r}
+AD_cycling_results = read_csv("./figures/rosmap_exc35/cycling_results/cosinor_results_AD.csv", show_col_types = F)
+
+AD_non_cyclers = dplyr::filter(AD_cycling_results, as.numeric(BHQ) >= 0.1 | as.numeric(amp_ratio) < 0.1 )
+
+CTL_cycling_results = read_csv("./figures/rosmap_exc35/cycling_results/cosinor_results_CTL.csv", show_col_types = F)
+
+CTL_non_cyclers = dplyr::filter(CTL_cycling_results, as.numeric(BHQ) >= 0.1 | as.numeric(amp_ratio) < 0.1) 
+
+```
+
+#### For Orpheus, we normalize raw counts again in the method ORPHEUS prefers, and this is done with all cells present. Read in saved data for speed.
+
+```{r}
+#Perform Orpheus normalization for all cells in combined:
+# s_obj = prepare_seurat_for_orpheus(seurat_obj = s_obj, assay = "RNA" )
+
+# SaveH5Seurat(s_obj, "../../figures/rosmap_exc35/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat", overwrite = FALSE, verbose = TRUE)
+
+file = "../../figures/rosmap_exc35/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat"
+s_obj = LoadH5Seurat(file, assays = c("ORPHEUS_norm"), reductions = F, graphs = F, neighbors = F, images = F)
+
+#make sure all the times, batch_bin, and pmi, sex are equal among individual_ID:
+# s_obj@meta.data %>%
+#   group_by(individualID) %>%
+#   summarise(
+#     across(c(batch_bin, sex, pmi, times, cond_cogdx, ceradsc, ceradsc_bin, braaksc, braaksc_bin), ~n_distinct(.x))
+#   )
+
+subject_meta <- s_obj@meta.data %>%
+  group_by(individualID) %>%
+  summarise(
+    batch_bin = first(batch_bin),
+    sex = first(sex),
+    pmi = first(pmi),
+    times = first(times),
+    cond = first(cond_cogdx),
+    ceradsc = first(ceradsc),
+    ceradsc_bin = first(ceradsc_bin),
+    braaksc = first(braaksc),
+    braaksc_bin = first(braaksc_bin)
+  )
+
+```
+
+#### GSVA pathway analysis for CTL subjects
+
+```{r}
+#convert logged PB counts to a df
+df_logcpm_pseudobulk = as.data.frame(logcpm_pseudobulk)
+
+#Grab the CTL subjects, and the non-rhythmic genes
+exc35_CTL_tmm_non_rhythmic = df_logcpm_pseudobulk[CTL_non_cyclers$Gene_Symbols, subject_meta$individualID[subject_meta$cond == 0]]
+  
+#Call GSVA, ranking CTL subjects by pathway score for all pathways
+gsva_res_ctl = gsva(as.matrix(exc35_CTL_tmm_non_rhythmic), genesets_list, min.sz =30) %>% as.data.frame
+# save(gsva_res_ctl, file ="~/Desktop/rosmap_exc35_ctl_gsva_matrix_keggHallmarkTogether_mnsize10.RData")
+# save(gsva_res_ctl, file ="~/Desktop/rosmap_exc35_ctl_gsva_matrix_keggHallmarkTogether_mnsize30.RData")
+# save(gsva_res_ctl, file = "~/Desktop/rosmap_exc35_ctl_gsva_matrix_kegg_mnsize30.RData")
+# save(gsva_res_ctl, file = "~/Desktop/rosmap_exc35_ctl_gsva_matrix_hallmark_mnsize30.RData")
+
+# Create a list to store results
+# #HALVES
+# pathway_groups_ctl <- apply(gsva_res_ctl, 1, function(scores) {
+#   med <- median(scores, na.rm = TRUE)   # median as threshold
+#   ifelse(scores >= med, "high", "low")
+# })
+
+#tertiles:
+pathway_groups_ctl <- apply(gsva_res_ctl, 1, function(scores) {
+  qs <- quantile(scores, probs = c(1/3, 2/3), na.rm = TRUE)
+
+  out = cut(
+    scores,
+    breaks = c(-Inf, qs[1], qs[2], Inf),
+    labels = c("low", "middle", "high"),
+    include.lowest = TRUE
+  )
+  names(out) <-names(scores)
+  out
+})
+table(pathway_groups_ctl[, 1])
+
+#Join subject metadata to pathway score information
+pathway_w_meta_ctl = merge(pathway_groups_ctl, subject_meta, by.x = 0, by.y= "individualID") %>% column_to_rownames(var = "Row.names")
+
+#subset s_obj to have only CTL cells:
+s_ctl <- subset(s_obj, subset = cond_cogdx == 0)
+table(s_ctl$cond_cogdx)
+#---------------------------------------------------------------------------
+# #Loop through all the pathways and create pb and variance matrices for each,
+#We will store these so I only have to do it once.
+
+pb_var_list = list()
+for(i in 1:ncol(pathway_groups_ctl)){
+
+pathway_name = colnames(pathway_w_meta_ctl)[i]
+message("Analyzing ", pathway_name)
+
+# #WW test
+# subject_strat = pathway_w_meta_ctl[,i]
+# times_split = split(pathway_w_meta_ctl$times, subject_strat)
+# test <- list(high = circular(times_split$high,
+#                  units="radians"),
+#   low = circular(times_split$low,
+#                      units="radians")
+# )
+# ww_test_res = circular::watson.wheeler.test(test)
+# if(ww_test_res$p.value < 0.05){
+#    message(pathway_name , " ww_test < 0.05, skipping.")
+#    next # Skips the rest of the current iteration
+# }
+# #cosinor test
+# stopifnot(rownames(gsva_res_ctl)[i] == pathway_name)
+# gsva_score = gsva_res_ctl[i,]
+# stopifnot(all.equal(rownames(pathway_w_meta_ctl), names(gsva_score)))
+# times = unname(unlist(as.numeric(pathway_w_meta_ctl$times)))
+# gsva_score = unname(unlist(as.numeric(gsva_score)))
+# base = lm(gsva_score ~ 1)
+# full = lm(gsva_score ~ cos(times) + sin(times))
+# anova_res = anova(base, full)
+# p_val = anova_res$`Pr(>F)`[2]
+# if(p_val < 0.05){
+#    message(pathway_name , " cosinor pval < 0.05, skipping.")
+#    plot(times, gsva_score, main = pathway_name)
+#    next # Skips the rest of the current iteration
+# }
+
+# Add the new metadata to the Seurat object
+stopifnot(!anyDuplicated(pathway_w_meta_ctl$Row.names))
+s_ctl$strat <- pathway_w_meta_ctl[match(s_ctl$orig.ident, rownames(pathway_w_meta_ctl)), i]
+table(s_ctl$strat, useNA = "ifany")
+
+orpheus_input_i = calculate_orpheus_inputs(s_ctl, groups_to_analyze = unique(s_ctl$strat), grouping_var = "strat")
+
+orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+input_i =  list("tmm" = orpheus_input_sans_counts)
+names(input_i) = pathway_name
+pb_var_list <- append(pb_var_list, input_i)
+
+}
+save(pb_var_list, file = "~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_hallmark_tertiles_mnsize30_noCosinorFiltering.RData")
+# save(pb_var_list, file ="~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_keggHallmarkTogether_mnsize10.RData")
+# save(pb_var_list, file ="~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_hallmark_mnsize30.RData")
+# save(pb_var_list, file ="~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_kegg_mnsize30.RData")
+load("./figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ctl_pb_var_matrices_list_hallmark_tertiles_mnsize30_noCosinorFiltering.RData")
+# load("./figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ctl_pb_var_matrices_list_keggHallmarkTogether_mnsize30.RData")
+load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+#---------------BEGIN new technique: cycling together--------------------  
+# run cycling on the high and low groups together (concatenated pseudobulk, etc.) to find which genes I will test by my normal cutoffs, then do Orpheus for those genes without any cutoffs.
+
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+# This ensures stopCluster runs even if the code below crashes!
+on.exit(stopCluster(cl))
+
+
+#Only need to run the cycling together analysis a single time, bc we are combining all subjects in condition 
+orpheus_input_i = pb_var_list[[1]]
+
+# #For HALVES
+# pb_combined  <- cbind(orpheus_input_i$high$pseudobulk_tmm_matrix, orpheus_input_i$low$pseudobulk_tmm_matrix)
+# 
+# var_combined <- cbind(orpheus_input_i$high$var_df, orpheus_input_i$low$var_df)
+#For Tertiles:
+pb_combined  <- cbind(orpheus_input_i$high$pseudobulk_tmm_matrix,
+                      orpheus_input_i$middle$pseudobulk_tmm_matrix,
+                      orpheus_input_i$low$pseudobulk_tmm_matrix)
+
+var_combined <- cbind(orpheus_input_i$high$var_df,
+                      orpheus_input_i$middle$var_df,
+                      orpheus_input_i$low$var_df)
+
+stopifnot(all.equal(colnames(var_combined), colnames(pb_combined)))
+
+
+meta_data_combined <- subject_meta[match(colnames(pb_combined), subject_meta$individualID), ]
+
+# #HALVES
+# meta_data_combined$group = c(rep("high",
+#       ncol(orpheus_input_i$high$pseudobulk_tmm_matrix)),
+#       rep("low",ncol(orpheus_input_i$low$pseudobulk_tmm_matrix) ))
+
+#TERTILES
+meta_data_combined$group = c(rep("high",ncol(orpheus_input_i$high$pseudobulk_tmm_matrix)),
+      rep("middle", ncol(orpheus_input_i$middle$pseudobulk_tmm_matrix)),
+      rep("low",ncol(orpheus_input_i$low$pseudobulk_tmm_matrix) ))
+
+times_combined = meta_data_combined$times
+
+pb_cycling = is_cycling_custom(times_combined, pb_combined, meta_data = meta_data_combined, time_units = "rad")
+
+pb_cycling_filt = filter(pb_cycling, as.numeric(amp_ratio) >=0.20 & as.numeric(BHQ) < 0.1)
+
+pb_phases = as.numeric(unname(unlist(pb_cycling_filt$acrophase_bulk)))
+
+#Subset the pseudobulk and variance matrices so I can save time not running var_cycling on non-cycling genes.
+pb_combined_subset = pb_combined[pb_cycling_filt$Gene_Symbols,]
+var_combined_subset = var_combined[pb_cycling_filt$Gene_Symbols,]
+stopifnot(all.equal(rownames(pb_combined_subset), rownames(var_combined_subset)))
+
+var_cyclers = var_cycling_custom_fixed_acro(times = times_combined, 
+    var_mat = var_combined_subset,
+    mean_mat = pb_combined_subset,    
+    phase_pb =  pb_phases,
+    meta_data = meta_data_combined,
+    time_units = "rad")
+
+
+#Which genes should I extract a phi from?
+bulk_thr_cutoff = 0.5  
+
+keep_genes = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var","_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var) %>%
+    select(Gene_Symbols) %>%
+    unname %>%
+    unlist
+
+#---------------END new technique: cycling together-------------------- 
+phi_outputs = list()
+stat_tests = list()
+
+for(pathway_name in names(pb_var_list)){
+orpheus_input_i = pb_var_list[[pathway_name]]
+
+cluster_phis = list()
+for(cell_type in names(orpheus_input_i)){
+print(paste("Analyzing condition", cell_type))
+tmp = orpheus_input_i[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+# times = s_ctl$times[match(colnames(pb_mat), s_ctl$individualID)] %>% unname %>% unlist
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+# stopifnot(all.equal(times, meta_data$times))
+stopifnot(all(meta_data$cond == 0)) #Are all subjects ctl?
+
+pb_mat_keep = pb_mat[keep_genes, ]
+var_mat_keep = var_mat[keep_genes, ]
+
+stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat_keep, meta_data, time_units = "rads")
+# write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+
+stopifnot(all.equal(pb_cycling_custom$Gene_Symbols , rownames(var_mat_keep)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+
+input_cos_cust = var_cyclers_cust %>%
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(Gene_Symbols %in% keep_genes) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    # column_to_rownames("Gene_Symbols")%>%
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+#Combine 'low' and 'high' groups
+phi_results_i <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+#----- plotting ------
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+color_palette <- c("high" = "deepskyblue", "low" = "orange", "middle" = "salmon")
+
+# Create the plot
+p <- phi_results_i %>% mutate(Source = factor(Source, levels = c("high", "middle", "low"))) %>%
+  ggplot(aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+    stat_compare_means(method = "kruskal.test") +
+
+  # stat_compare_means(
+  #   method = "wilcox.test",         # Specify the statistical test
+  #   comparisons = list(c("high", "low")), # A list of the pairs to compare
+  #   label = "p.signif",             # Display significance levels
+  #   label.y = 7, # Adjust vertical position of the bar
+  #   tip.length = 0.02 # Length of the small vertical lines
+  # ) +
+  # Add labels and a title
+  labs(
+    title = pathway_name,
+    y = "Phase Dispersion (hrs)",
+    x = "Pathway stratification"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  ylim(c(0,8))
+#print(p)
+ggsave(paste0("~/Desktop/rosmap_exc35_pathways_ctl/exc35_phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
+
+
+phi_output_i =  list("tmm" = phi_results_i)
+names(phi_output_i) = pathway_name
+phi_outputs <- append(phi_outputs, phi_output_i)
+
+# w_test = wilcox.test(phi~Source, data = phi_results_i)
+# paired_df = phi_results_i %>% 
+#   filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+#   pivot_wider(
+#     id_cols = Row.names, 
+#     names_from  = Source,
+#     values_from = phi
+#   )%>%drop_na()
+# w_test_paired = wilcox.test(paired_df$high, paired_df$low, paired = T)
+# tests = list( list("wilcox" = w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+
+# k_test = kruskal.test(phi~Source, data = phi_results_i)
+# pairwise_w_test = pairwise.wilcox.test(phi_results_i$phi, phi_results_i$Source, p.adjust.method = "BH")
+# tests = list( list("kruskal" = k_test, "pairwise.wilcox" = pairwise_w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+
+}
+
+all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
+
+
+save(phi_outputs, file = "~/Desktop/rosmap_exc35_pathways_ctl/rosmap_exc35_ctl_pathway_phis.RData")
+save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_pathways_ctl/rosmap_exc35_ctl_pathway_phis_df.RData")
+
+stopCluster(cl)
+
+
+# wilcox_pvals <- sapply(stat_tests, function(x) x[["wilcox"]][["p.value"]])
+# wilcox_stat <- sapply(stat_tests, function(x) x[["wilcox"]][["statistic"]])
+# wilcox_paired_pvals <- sapply(stat_tests, function(x) x[["wilcox_paired"]][["p.value"]])
+# wilcox_paired_stat <- sapply(stat_tests, function(x) x[["wilcox_paired"]][["statistic"]])
+
+# wilcox.df = data.frame("pval" = wilcox_pvals,"test_stat" = wilcox_stat,  "BHQ" = p.adjust(wilcox_pvals, method = "BH"))
+# save(wilcox.df, file = "~/Desktop/rosmap_exc35_pathways_ctl/wilcox_df.RData")
+
+
+# kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
+# kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
+# save(kruskal.df, file = "~/Desktop/rosmap_exc35_pathways_ctl/kruskal_df.RData")
+# save(stat_tests, file = "~/Desktop/rosmap_exc35_pathways_ctl/stats_test.RData")
+```
+
+#### GSVA pathways for AD
+
+```{r}
+#convert logged PB counts to a df
+df_logcpm_pseudobulk = as.data.frame(logcpm_pseudobulk)
+
+#Grab the AD subjects, and the non-rhythmic genes
+exc35_AD_tmm_non_rhythmic = df_logcpm_pseudobulk[AD_non_cyclers$Gene_Symbols, subject_meta$individualID[subject_meta$cond == 1]]
+  
+#Call GSVA, ranking AD subjects by pathway score for all pathways
+gsva_res_ad = gsva(as.matrix(exc35_AD_tmm_non_rhythmic), genesets_list, min.sz =30) %>% as.data.frame
+# save(gsva_res_ad, file ="~/Desktop/rosmap_exc35_ad_gsva_matrix_keggHallmarkTogether_mnsize10.RData")
+# save(gsva_res_ad, file ="~/Desktop/rosmap_exc35_ad_gsva_matrix_keggHallmarkTogether_mnsize30.RData")
+# save(gsva_res_ad, file = "~/Desktop/rosmap_exc35_ad_gsva_matrix_hallmark_mnsize30.RData")
+# save(gsva_res_ad, file = "~/Desktop/rosmap_exc35_ad_gsva_matrix_kegg_mnsize30.RData")
+
+# Create a list to store results
+# #HALVES
+# pathway_groups_ad <- apply(gsva_res_ad, 1, function(scores) {
+#   med <- median(scores, na.rm = TRUE)   # median as threshold
+#   ifelse(scores >= med, "high", "low")
+# })
+
+#tertiles:
+pathway_groups_ad <- apply(gsva_res_ad, 1, function(scores) {
+  qs <- quantile(scores, probs = c(1/3, 2/3), na.rm = TRUE)
+
+  out = cut(
+    scores,
+    breaks = c(-Inf, qs[1], qs[2], Inf),
+    labels = c("low", "middle", "high"),
+    include.lowest = TRUE
+  )
+  names(out) <-names(scores)
+  out
+})
+table(pathway_groups_ad[, 1])
+
+#Join subject metadata to pathway score information
+pathway_w_meta_ad = merge(pathway_groups_ad, subject_meta, by.x = 0, by.y= "individualID") %>% column_to_rownames(var = "Row.names")
+
+#subset s_obj to have only AD cells:
+s_ad <- subset(s_obj, subset = cond_cogdx == 1)
+table(s_ad$cond_cogdx)
+#---------------------------------------------------------------------------
+#Loop through all the pathways and create pb and variance matrices for each,
+#We will store these so I only have to do it once.
+
+pb_var_list = list()
+for(i in 1:ncol(pathway_groups_ad)){
+
+pathway_name = colnames(pathway_w_meta_ad)[i]
+message("Analyzing ", pathway_name)
+
+# subject_strat = pathway_w_meta_ad[,i]
+# times_split = split(pathway_w_meta_ad$times, subject_strat)
+# test <- list(high = circular(times_split$high,
+#                  units="radians"),
+#   low = circular(times_split$low,
+#                      units="radians")
+# )
+# ww_test_res = circular::watson.wheeler.test(test)
+# if(ww_test_res$p.value < 0.05){
+#    message(pathway_name , " ww_test < 0.05, skipping.")
+#    next # Skips the rest of the current iteration
+# }
+# #cosinor test
+# stopifnot(rownames(gsva_res_ad)[i] == pathway_name)
+# gsva_score = gsva_res_ad[i,]
+# stopifnot(all.equal(rownames(pathway_w_meta_ad), names(gsva_score)))
+# times = unname(unlist(as.numeric(pathway_w_meta_ad$times)))
+# gsva_score = unname(unlist(as.numeric(gsva_score)))
+# base = lm(gsva_score ~ 1)
+# full = lm(gsva_score ~ cos(times) + sin(times))
+# anova_res = anova(base, full)
+# p_val = anova_res$`Pr(>F)`[2]
+# if(p_val < 0.05){
+#    message(pathway_name , " cosinor pval < 0.05, skipping.")
+#    plot(times, gsva_score, main = pathway_name)
+#    next # Skips the rest of the current iteration
+# }
+
+# Add the new metadata to the Seurat object
+stopifnot(!anyDuplicated(pathway_w_meta_ad$Row.names))
+s_ad$strat <- pathway_w_meta_ad[match(s_ad$orig.ident, rownames(pathway_w_meta_ad)), i]
+table(s_ad$strat, useNA = "ifany")
+
+orpheus_input_i = calculate_orpheus_inputs(s_ad, groups_to_analyze = unique(s_ad$strat), grouping_var = "strat")
+
+orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+input_i =  list("tmm" = orpheus_input_sans_counts)
+names(input_i) = pathway_name
+pb_var_list <- append(pb_var_list, input_i)
+
+}
+save(pb_var_list, file = "~/Desktop/rosmap_exc35_ad_pb_var_matrices_list_hallmark_tertiles_mnsize30_noCosinorFiltering.RData")
+# save(pb_var_list, file = "~/Desktop/rosmap_exc35_ad_pb_var_matrices_list_keggHallmarkTogether_mnsize10.RData")
+# save(pb_var_list, file ="figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ad_pb_var_matrices_list_hallmark_mnsize30.RData")
+# save(pb_var_list, file ="figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ad_pb_var_matrices_list_kegg_mnsize30.RData")
+# load("figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ad_pb_var_matrices_list_keggHallmarkTogether_mnsize30.RData")
+load("figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ad_pb_var_matrices_list_hallmark_tertiles_mnsize30_noCosinorFiltering.RData")
+load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+
+#---------------BEGIN new technique: cycling together--------------------  
+# run cycling on the high and low groups together (concatenated pseudobulk, etc.) to find which genes I will test by my normal cutoffs, then do Orpheus for those genes without any cutoffs.
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+# This ensures stopCluster runs even if the code below crashes!
+on.exit(stopCluster(cl))
+
+#Only need to run the cycling together analysis a single time, bc we are combining all subjects in condition 
+orpheus_input_i = pb_var_list[[1]]
+
+# #For HALVES:
+# pb_combined  <- cbind(orpheus_input_i$high$pseudobulk_tmm_matrix, orpheus_input_i$low$pseudobulk_tmm_matrix)
+# 
+# var_combined <- cbind(orpheus_input_i$high$var_df, orpheus_input_i$low$var_df)
+
+#For tertiles:
+pb_combined  <- cbind(orpheus_input_i$high$pseudobulk_tmm_matrix,
+                      orpheus_input_i$middle$pseudobulk_tmm_matrix,
+                      orpheus_input_i$low$pseudobulk_tmm_matrix)
+
+var_combined <- cbind(orpheus_input_i$high$var_df,
+                      orpheus_input_i$middle$var_df,
+                      orpheus_input_i$low$var_df)
+
+stopifnot(all.equal(colnames(var_combined), colnames(pb_combined)))
+
+
+meta_data_combined <- subject_meta[match(colnames(pb_combined), subject_meta$individualID), ]
+
+# #HALVES
+# meta_data_combined$group = c(rep("high",
+#       ncol(orpheus_input_i$high$pseudobulk_tmm_matrix)),
+#       rep("low",ncol(orpheus_input_i$low$pseudobulk_tmm_matrix) ))
+
+#TERTILES
+meta_data_combined$group = c(rep("high",
+      ncol(orpheus_input_i$high$pseudobulk_tmm_matrix)),
+      rep("middle", ncol(orpheus_input_i$middle$pseudobulk_tmm_matrix)),
+      rep("low",ncol(orpheus_input_i$low$pseudobulk_tmm_matrix) ))
+
+times_combined = meta_data_combined$times
+
+pb_cycling = is_cycling_custom(times_combined, pb_combined, meta_data = meta_data_combined, time_units = "rad")
+
+pb_cycling_filt = filter(pb_cycling, as.numeric(amp_ratio) >=0.20 & as.numeric(BHQ) < 0.1)
+
+pb_phases = as.numeric(unname(unlist(pb_cycling_filt$acrophase_bulk)))
+
+#Subset the pseudobulk and variance matrices so I can save time not running var_cycling on non-cycling genes.
+pb_combined_subset = pb_combined[pb_cycling_filt$Gene_Symbols,]
+var_combined_subset = var_combined[pb_cycling_filt$Gene_Symbols,]
+stopifnot(all.equal(rownames(pb_combined_subset), rownames(var_combined_subset)))
+
+var_cyclers = var_cycling_custom_fixed_acro(times = times_combined, 
+    var_mat = var_combined_subset,
+    mean_mat = pb_combined_subset,    
+    phase_pb =  pb_phases,
+    meta_data = meta_data_combined,
+    time_units = "rad")
+
+
+#Which genes should I extract a phi from?
+bulk_thr_cutoff = 0.5  
+
+keep_genes = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var","_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var) %>%
+    select(Gene_Symbols) %>%
+    unname %>%
+    unlist
+
+#---------------END new technique: cycling together--------------------  
+phi_outputs = list()
+stat_tests = list()
+
+for(pathway_name in names(pb_var_list)){
+orpheus_input_i = pb_var_list[[pathway_name]]
+
+cluster_phis = list()
+for(cell_type in names(orpheus_input_i)){
+print(paste("Analyzing condition", cell_type))
+tmp = orpheus_input_i[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+# stopifnot(all.equal(times, meta_data$times))
+stopifnot(all(meta_data$cond == 1)) #Are all subjects AD?
+
+pb_mat_keep = pb_mat[keep_genes, ]
+var_mat_keep = var_mat[keep_genes, ]
+
+stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat_keep, meta_data, time_units = "rads")
+# write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+
+stopifnot(all.equal(pb_cycling_custom$Gene_Symbols , rownames(var_mat_keep)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+
+input_cos_cust = var_cyclers_cust %>%
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(Gene_Symbols %in% keep_genes) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    # column_to_rownames("Gene_Symbols")%>%
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+#Combine 'low' and 'high' groups
+phi_results_i <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+#----- plotting ------
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+color_palette <- c("high" = "deepskyblue", "low" = "orange", "middle" = "salmon")
+
+# Create the plot
+p <- phi_results_i %>% mutate(Source = factor(Source, levels = c("high", "middle", "low"))) %>%
+  ggplot(aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(method = "kruskal.test") +
+  # stat_compare_means(
+  #   method = "wilcox.test",         # Specify the statistical test
+  #   comparisons = list(c("high", "low")), # A list of the pairs to compare
+  #   label = "p.signif",             # Display significance levels
+  #   label.y = 7, # Adjust vertical position of the bar
+  #   tip.length = 0.02 # Length of the small vertical lines
+  # ) +
+  # Add labels and a title
+  labs(
+    title = pathway_name,
+    y = "Phase Dispersion (hrs)",
+    x = "Pathway stratification"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  ylim(c(0,8))
+#print(p)
+ggsave(paste0("~/Desktop/rosmap_exc35_pathways_ad/exc35_phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
+
+phi_output_i =  list("tmm" = phi_results_i)
+names(phi_output_i) = pathway_name
+phi_outputs <- append(phi_outputs, phi_output_i)
+
+# w_test = wilcox.test(phi~Source, data = phi_results_i)
+# tests = list( list("wilcox" = w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+
+# k_test = kruskal.test(phi~Source, data = phi_results_i)
+# pairwise_w_test = pairwise.wilcox.test(phi_results_i$phi, phi_results_i$Source, p.adjust.method = "BH")
+# tests = list( list("kruskal" = k_test, "pairwise.wilcox" = pairwise_w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+}
+
+all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
+
+
+save(phi_outputs, file = "~/Desktop/rosmap_exc35_pathways_ad/rosmap_exc35_ad_pathway_phis.RData")
+save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_pathways_ad/rosmap_exc35_ad_pathway_phis_df.RData")
+
+stopCluster(cl)
+
+# wilcox_pvals <- sapply(stat_tests, function(x) x[["wilcox"]][["p.value"]])
+# wilcox_stat <- sapply(stat_tests, function(x) x[["wilcox"]][["statistic"]])
+# wilcox.df = data.frame("pval" = wilcox_pvals,test_stat = wilcox_stat,  "BHQ" = p.adjust(wilcox_pvals, method = "BH"))
+# save(wilcox.df, file = "~/Desktop/rosmap_exc35_pathways_ad/wilcox_df.RData")
+
+# kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
+# kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
+# save(kruskal.df, file = "~/Desktop/rosmap_exc35_pathways_ad/kruskal_df.RData")
+# save(stat_tests, file = "~/Desktop/rosmap_exc35_pathways_ad/stats_test.RData")
+```
+
+#### How well correlated are the pathway scores with each other and with disease?
+
+```{r}
+
+library(corrplot)
+file = "../../figures/rosmap_exc35/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat"
+s_obj = LoadH5Seurat(file, assays = c("ORPHEUS_norm"), reductions = F, graphs = F, neighbors = F, images = F)
+
+
+subject_meta <- s_obj@meta.data %>%
+  group_by(individualID) %>%
+  summarise(
+    batch_bin = first(batch_bin),
+    sex = first(sex),
+    pmi = first(pmi),
+    times = first(times),
+    cond = first(cond_cogdx),
+    ceradsc = first(ceradsc),
+    ceradsc_bin = first(ceradsc_bin),
+    braaksc = first(braaksc),
+    braaksc_bin = first(braaksc_bin)
+  )
+
+
+#HALLMARK CTL#
+load("figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ctl_gsva_matrix_hallmark_mnsize30.RData")
+subject_meta_ctl_mat = filter(subject_meta, cond == 0) %>%
+    column_to_rownames(var = "individualID") %>%
+    select(c(sex, pmi, ceradsc, braaksc)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    t %>% as.matrix
+
+stopifnot(all.equal(colnames(subject_meta_ctl_mat), colnames(gsva_res_ctl)))
+
+gsva_res_ctl_w_meta <- rbind(gsva_res_ctl, subject_meta_ctl_mat)
+
+rownames(gsva_res_ctl_w_meta) = str_remove(rownames(gsva_res_ctl_w_meta), "HALLMARK_")
+
+pathway_cors = cor(t(gsva_res_ctl_w_meta))
+corrplot(
+  pathway_cors,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.cex = 0.6,
+  tl.col = "black",
+  addCoef.col = "black", # Add coefficient of correlation
+  number.font = 1,
+  number.cex = .8,
+  col = colorRampPalette(c("blue", "white", "red"))(200)
+)
+
+#KEGG ctl
+load("figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ctl_gsva_matrix_kegg_mnsize30.RData")
+subject_meta_ctl_mat = filter(subject_meta, cond == 0) %>%
+    column_to_rownames(var = "individualID") %>%
+    select(c(sex, pmi, ceradsc, braaksc)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    t %>% as.matrix
+
+stopifnot(all.equal(colnames(subject_meta_ctl_mat), colnames(gsva_res_ctl)))
+
+gsva_res_ctl_w_meta <- rbind(gsva_res_ctl, subject_meta_ctl_mat)
+
+rownames(gsva_res_ctl_w_meta) = str_remove(rownames(gsva_res_ctl_w_meta), "KEGG_")
+
+pathway_cors = cor(t(gsva_res_ctl_w_meta))
+corrplot(
+  pathway_cors,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.cex = 0.6,
+  tl.col = "black",
+  addCoef.col = "black", # Add coefficient of correlation
+  number.font = 1,
+  number.cex = .8,
+  col = colorRampPalette(c("blue", "white", "red"))(200)
+)
+
+#HALLMARK AD#
+load("figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ad_gsva_matrix_hallmark_mnsize30.RData")
+subject_meta_ad_mat = filter(subject_meta, cond == 1) %>%
+    column_to_rownames(var = "individualID") %>%
+    select(c(sex, pmi, ceradsc, braaksc)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    t %>% as.matrix
+
+stopifnot(all.equal(colnames(subject_meta_ad_mat), colnames(gsva_res_ad)))
+
+gsva_res_ad_w_meta <- rbind(gsva_res_ad, subject_meta_ad_mat)
+
+rownames(gsva_res_ad_w_meta) = str_remove(rownames(gsva_res_ad_w_meta), "HALLMARK_")
+
+pathway_cors = cor(t(gsva_res_ad_w_meta))
+corrplot(
+  pathway_cors,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.cex = 0.6,
+  tl.col = "black",
+  addCoef.col = "black", # Add coefficient of correlation
+  number.font = 1,
+  number.cex = .6,
+  col = colorRampPalette(c("blue", "white", "red"))(200)
+)
+
+#Kegg AD#
+load("figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ad_gsva_matrix_kegg_mnsize30.RData")
+subject_meta_ad_mat = filter(subject_meta, cond == 1) %>%
+    column_to_rownames(var = "individualID") %>%
+    select(c(sex, pmi, ceradsc, braaksc)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    t %>% as.matrix
+
+stopifnot(all.equal(colnames(subject_meta_ad_mat), colnames(gsva_res_ad)))
+
+gsva_res_ad_w_meta <- rbind(gsva_res_ad, subject_meta_ad_mat)
+
+rownames(gsva_res_ad_w_meta) = str_remove(rownames(gsva_res_ad_w_meta), "KEGG_")
+
+pathway_cors = cor(t(gsva_res_ad_w_meta))
+corrplot(
+  pathway_cors,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.cex = 0.6,
+  tl.col = "black",
+  addCoef.col = "black", # Add coefficient of correlation
+  number.font = 1,
+  number.cex = .6,
+  col = colorRampPalette(c("blue", "white", "red"))(200)
+)
+
+######### Looking at my significant results only #####
+load("./figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ad_gsva_matrix_keggHallmarkTogether_mnsize10.RData")
+plot(unname(unlist(gsva_res_ad["HALLMARK_MTORC1_SIGNALING",])), unname(unlist(gsva_res_ad["HALLMARK_PROTEIN_SECRETION",])))
+cor(unname(unlist(gsva_res_ad["HALLMARK_MTORC1_SIGNALING",])), unname(unlist(gsva_res_ad["HALLMARK_PROTEIN_SECRETION",])))
+
+#####MTORC vs PB
+load("figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ad_gsva_matrix_hallmark_mnsize30.RData")
+load("exc35_ctl_ad_pb_var_list.RData")
+mtor_pb_ad = orpheus_inputs[["1"]][["pseudobulk_tmm_matrix"]]["PRKAA2", ] 
+all(colnames(mtor_pb_ad) == colnames(gsva_res_ad))
+cor(unname(unlist(mtor_pb_ad)), unname(unlist(gsva_res_ad["HALLMARK_MTORC1_SIGNALING",])))
+```
+
+### Generate empirical distribution for phi \~ pathway group
+
+```{r}
+library(GSVA)
+library(msigdbr)
+library(edgeR)
+library(SeuratDisk)
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(circular)
+#load in logged counts
+load("../../figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
+```
+
+#### Load in s_obj
+
+```{r}
+file = "../../figures/rosmap_exc35/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat"
+s_obj = LoadH5Seurat(file, assays = c("ORPHEUS_norm"), reductions = F, graphs = F, neighbors = F, images = F)
+
+subject_meta <- s_obj@meta.data %>%
+  group_by(individualID) %>%
+  summarise(
+    batch_bin = first(batch_bin),
+    sex = first(sex),
+    pmi = first(pmi),
+    times = first(times),
+    cond = first(cond_cogdx),
+    ceradsc = first(ceradsc),
+    ceradsc_bin = first(ceradsc_bin),
+    braaksc = first(braaksc),
+    braaksc_bin = first(braaksc_bin)
+  )
+
+```
+
+#### Generate random grp assignments for CTL subs
+
+```{r}
+set.seed(1234)
+
+ctl_subs = subject_meta$individualID[subject_meta$cond == 0]
+
+n_boots = 1000
+
+gsva_res_ctl_rand = as.data.frame(matrix(rnorm(n_boots*length(ctl_subs)), nrow = n_boots))
+colnames(gsva_res_ctl_rand) = ctl_subs
+
+# #HALVES:
+# pathway_groups_ctl <- apply(gsva_res_ctl_rand, 1, function(scores) {
+#   med <- median(scores, na.rm = TRUE)   # median as threshold
+#   ifelse(scores >= med, "high", "low")
+# })
+#tertiles:
+pathway_groups_ctl <- apply(gsva_res_ctl_rand, 1, function(scores) {
+  qs <- quantile(scores, probs = c(1/3, 2/3), na.rm = TRUE)
+
+  out = cut(
+    scores,
+    breaks = c(-Inf, qs[1], qs[2], Inf),
+    labels = c("low", "middle", "high"),
+    include.lowest = TRUE
+  )
+  names(out) <-names(scores)
+  out
+})
+table(pathway_groups_ctl[, 1])
+
+#Join subject metadata to pathway score information
+pathway_w_meta_ctl = merge(pathway_groups_ctl, subject_meta, by.x = 0, by.y= "individualID") %>% column_to_rownames(var = "Row.names")
+
+#subset s_obj to have only CTL cells:
+s_ctl <- subset(s_obj, subset = cond_cogdx == 0)
+table(s_ctl$cond_cogdx)
+
+#---------------------------------------------------------------------------
+# #Loop through all the pathways and create pb and variance matrices for each,
+#We will store these so I only have to do it once.
+
+pb_var_list = list()
+for(i in 1:ncol(pathway_groups_ctl)){
+
+pathway_name = colnames(pathway_w_meta_ctl)[i]
+message("Analyzing ", pathway_name)
+
+# #WW TEST
+# subject_strat = pathway_w_meta_ctl[,i]
+# times_split = split(pathway_w_meta_ctl$times, subject_strat)
+# test <- list(high = circular(times_split$high,
+#                  units="radians"),
+#   low = circular(times_split$low,
+#                      units="radians")
+# )
+# ww_test_res = circular::watson.wheeler.test(test)
+# if(ww_test_res$p.value < 0.05){
+#    message(pathway_name , " ww_test < 0.05, skipping.")
+#    next # Skips the rest of the current iteration
+# }
+#cosinor test
+# gsva_score = gsva_res_ctl_rand[i,]
+# stopifnot(all.equal(rownames(pathway_w_meta_ctl), names(gsva_score)))
+# times = unname(unlist(as.numeric(pathway_w_meta_ctl$times)))
+# gsva_score = unname(unlist(as.numeric(gsva_score)))
+# base = lm(gsva_score ~ 1)
+# full = lm(gsva_score ~ cos(times) + sin(times))
+# anova_res = anova(base, full)
+# p_val = anova_res$`Pr(>F)`[2]
+# if(p_val < 0.05){
+#    message(pathway_name , " cosinor pval < 0.05, skipping.")
+#    # plot(times, gsva_score, main = pathway_name)
+#    next # Skips the rest of the current iteration
+# }
+
+# Add the new metadata to the Seurat object
+stopifnot(!anyDuplicated(rownames(pathway_w_meta_ctl)))
+s_ctl$strat <- pathway_w_meta_ctl[match(s_ctl$orig.ident, rownames(pathway_w_meta_ctl)), i]
+table(s_ctl$strat, useNA = "ifany")
+
+orpheus_input_i = calculate_orpheus_inputs(s_ctl, groups_to_analyze = unique(s_ctl$strat), grouping_var = "strat")
+
+orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+input_i =  list("tmm" = orpheus_input_sans_counts)
+names(input_i) = pathway_name
+pb_var_list <- append(pb_var_list, input_i)
+
+}
+# save(pb_var_list, file ="~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_randomAssignment_for_null_dist_tertiles_1000trials.RData")
+
+load("./figures/rosmap_exc35/pathway_analysis/rosmap_exc35_CTLPATHWAY_NoCosinorFilter_pb_var_matrices_list_randomAssignment_for_null_dist_tertiles_1000trials.RData")
+load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+
+#---------------BEGIN new technique: cycling together--------------------  
+# run cycling on the high and low groups together (concatenated pseudobulk, etc.) to find which genes I will test by my normal cutoffs, then do Orpheus for those genes without any cutoffs.
+
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+# This ensures stopCluster runs even if the code below crashes!
+on.exit(stopCluster(cl))
+
+orpheus_input_i = pb_var_list[[1]]
+
+# #For HALVES
+# pb_combined  <- cbind(orpheus_input_i$high$pseudobulk_tmm_matrix, orpheus_input_i$low$pseudobulk_tmm_matrix)
+# 
+# var_combined <- cbind(orpheus_input_i$high$var_df, orpheus_input_i$low$var_df)
+#For Tertiles:
+pb_combined  <- cbind(orpheus_input_i$high$pseudobulk_tmm_matrix,
+                      orpheus_input_i$middle$pseudobulk_tmm_matrix,
+                      orpheus_input_i$low$pseudobulk_tmm_matrix)
+
+var_combined <- cbind(orpheus_input_i$high$var_df,
+                      orpheus_input_i$middle$var_df,
+                      orpheus_input_i$low$var_df)
+
+stopifnot(all.equal(colnames(var_combined), colnames(pb_combined)))
+
+
+meta_data_combined <- subject_meta[match(colnames(pb_combined), subject_meta$individualID), ]
+
+# #HALVES
+# meta_data_combined$group = c(rep("high",
+#       ncol(orpheus_input_i$high$pseudobulk_tmm_matrix)),
+#       rep("low",ncol(orpheus_input_i$low$pseudobulk_tmm_matrix) ))
+
+#TERTILES
+meta_data_combined$group = c(rep("high",ncol(orpheus_input_i$high$pseudobulk_tmm_matrix)),
+      rep("middle", ncol(orpheus_input_i$middle$pseudobulk_tmm_matrix)),
+      rep("low",ncol(orpheus_input_i$low$pseudobulk_tmm_matrix) ))
+times_combined = meta_data_combined$times
+
+pb_cycling = is_cycling_custom(times_combined, pb_combined, meta_data = meta_data_combined, time_units = "rad")
+
+pb_cycling_filt = filter(pb_cycling, as.numeric(amp_ratio) >=0.20 & as.numeric(BHQ) < 0.1)
+
+pb_phases = as.numeric(unname(unlist(pb_cycling_filt$acrophase_bulk)))
+
+#Subset the pseudobulk and variance matrices so I can save time not running var_cycling on non-cycling genes.
+pb_combined_subset = pb_combined[pb_cycling_filt$Gene_Symbols,]
+var_combined_subset = var_combined[pb_cycling_filt$Gene_Symbols,]
+stopifnot(all.equal(rownames(pb_combined_subset), rownames(var_combined_subset)))
+
+var_cyclers = var_cycling_custom_fixed_acro(times = times_combined, 
+    var_mat = var_combined_subset,
+    mean_mat = pb_combined_subset,    
+    phase_pb =  pb_phases,
+    meta_data = meta_data_combined,
+    time_units = "rad")
+
+
+#Which genes should I extract a phi from?
+bulk_thr_cutoff = 0.5  
+
+keep_genes = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var","_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var) %>%
+    select(Gene_Symbols) %>%
+    unname %>%
+    unlist
+
+#---------------END new technique: cycling together--------------------
+phi_outputs = list()
+stat_tests = list()
+for(pathway_name in names(pb_var_list)){
+orpheus_input_i = pb_var_list[[pathway_name]]
+
+cluster_phis = list()
+for(cell_type in names(orpheus_input_i)){
+print(paste("Analyzing condition", cell_type))
+tmp = orpheus_input_i[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+# stopifnot(all.equal(times, meta_data$times))
+stopifnot(all(meta_data$cond == 0)) #Are all subjects ctl?
+
+pb_mat_keep = pb_mat[keep_genes, ]
+var_mat_keep = var_mat[keep_genes, ]
+
+stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat_keep, meta_data, time_units = "rads")
+# write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+
+stopifnot(all.equal(pb_cycling_custom$Gene_Symbols , rownames(var_mat_keep)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+
+input_cos_cust = var_cyclers_cust %>%
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(Gene_Symbols %in% keep_genes) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    # column_to_rownames("Gene_Symbols")%>%
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+#Combine 'low' and 'high' groups
+phi_results_i <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+phi_results_i_filt = filter(phi_results_i, !is.na(as.numeric(phi)) & as.numeric(fund_mean_coeff) > 0)
+
+#----- plotting ------
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+color_palette <- c("high" = "deepskyblue", "low" = "orange", "middle" = "salmon")
+
+# Create the plot
+p <- phi_results_i_filt %>% mutate(Source = factor(Source, levels = c("high", "middle", "low"))) %>%
+  ggplot(aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+    stat_compare_means(method = "kruskal.test") +
+
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("high", "low")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = pathway_name,
+    y = "Phase Dispersion (hrs)",
+    x = "Pathway stratification"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  ylim(c(0,8))
+#print(p)
+ggsave(paste0("~/Desktop/rosmap_exc35_null_dist_ctl/exc35_phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
+
+
+phi_output_i =  list("tmm" = phi_results_i)
+names(phi_output_i) = pathway_name
+phi_outputs <- append(phi_outputs, phi_output_i)
+
+# w_test = wilcox.test(phi~Source, data = phi_results_i_filt)
+# w_test[["sizes"]] = table(phi_results_i_filt$Source)
+# tests = list( list("wilcox" = w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+
+# k_test = kruskal.test(phi~Source, data = phi_results_i)
+# pairwise_w_test = pairwise.wilcox.test(phi_results_i$phi, phi_results_i$Source, p.adjust.method = "BH")
+# tests = list( list("kruskal" = k_test, "pairwise.wilcox" = pairwise_w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+
+}
+
+all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
+
+
+save(phi_outputs, file = "~/Desktop/rosmap_exc35_null_dist_ctl/rosmap_exc35_ctl_pathway_phis.RData")
+save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_null_dist_ctl/rosmap_exc35_ctl_pathway_phis_df.RData")
+
+stopCluster(cl)
+# wilcox_pvals <- sapply(stat_tests, function(x) x[["wilcox"]][["p.value"]])
+# wilcox_W <- sapply(stat_tests, function(x) x[["wilcox"]][["statistic"]])
+# sizes <- sapply(stat_tests, function(x) x[["wilcox"]][["sizes"]])
+# wilcox.df = data.frame("pval" = wilcox_pvals, test_stat =wilcox_W , "BHQ" = p.adjust(wilcox_pvals, method = "BH"), "n1" = sizes[1,], "n2" = sizes[2,])
+# save(wilcox.df, file = "~/Desktop/rosmap_exc35_null_dist_ctl/wilcox_df.RData")
+
+
+# kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
+# kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
+# save(kruskal.df, file = "~/Desktop/rosmap_exc35_pathways_ctl/kruskal_df.RData")
+# save(stat_tests, file = "~/Desktop/rosmap_exc35_null_dist_ctl/stats_test.RData")
+```
+
+##### Calculate significance of CTL pathways from empirical dist:
+
+```{r}
+load("figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ctl_null_dist_1000tertiles_noCosinorFiltering/rosmap_exc35_ctl_pathway_phis.RData")
+
+
+any(table(names(phi_outputs)) !=1)
+
+ctl_null_data_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, pathway = .y)) %>%
+  mutate(Source = factor(Source, levels = c("high","middle", "low")))
+
+#Unpaired version:
+null_stats_df <- ctl_null_data_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  group_by(pathway) %>%
+  summarise(
+    n_high = sum(Source == levels(Source)[1]),
+    n_medium = sum(Source == levels(Source)[2]),
+    n_low = sum(Source == levels(Source)[3]),
+    #p_value = wilcox.test(phi ~ Source)$p.value,
+    #statistic = wilcox.test(phi ~ Source)$statistic,
+    med_high = median(phi[Source == levels(Source)[1]]),
+    med_medium = median(phi[Source == levels(Source)[2]]),
+    med_low = median(phi[Source == levels(Source)[3]]),
+    .groups = "drop"
+  ) %>% #mutate(normed_stat = statistic/(n_low*n_high)) %>%
+  mutate(med_diff = med_high - med_low) %>%
+  mutate(abs_med_diff = abs(med_diff))
+
+cutoffs = quantile(null_stats_df$abs_med_diff, probs = c(0.95, 0.99))
+
+load("figures/rosmap_exc35/pathway_approach2/hallmark_ctl_tertiles_mnsize30_noCosinorFiltering/rosmap_exc35_ctl_pathway_phis.RData")
+
+ctl_all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, pathway = .y)) %>%
+  mutate(Source = factor(Source, levels = c("high","middle", "low")))
+
+#Unpaired version:
+ctl_stats_df <- ctl_all_pathway_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  group_by(pathway) %>%
+  summarise(
+    n_high = sum(Source == levels(Source)[1]),
+    n_medium = sum(Source == levels(Source)[2]),
+    n_low = sum(Source == levels(Source)[3]),
+    #p_value = wilcox.test(phi ~ Source)$p.value,
+    #statistic = wilcox.test(phi ~ Source)$statistic,
+    med_high = median(phi[Source == levels(Source)[1]]),
+    med_medium = median(phi[Source == levels(Source)[2]]),
+    med_low = median(phi[Source == levels(Source)[3]]),
+    .groups = "drop"
+  ) %>% #mutate(normed_stat = statistic/(n_low*n_high)) %>%
+  mutate(med_diff = med_high - med_low) %>%
+  mutate(abs_med_diff = abs(med_diff)) %>%
+  mutate(sig_05 = ifelse(abs_med_diff > cutoffs[1], T, F)) %>%
+  mutate(sig_01 = ifelse(abs_med_diff > cutoffs[2], T, F))
+
+
+p_empirical <- function(x, null_vec) {
+  (sum(null_vec >= x) + 1) / (length(null_vec) + 1)
+}
+ctl_stats_df$p_value <- sapply(ctl_stats_df$abs_med_diff, p_empirical, null_vec = null_stats_df$abs_med_diff)
+
+# write.table(ctl_stats_df, file = "./figures/rosmap_exc35/pathway_approach2/hallmark_ctl_tertiles_mnsize30_noCosinorFiltering/rosmap_exc35_ctl_pathways_significance_result.csv", sep = ",", row.names = F)
+
+
+```
+
+#### Do the same with AD data
+
+```{r}
+set.seed(1234)
+
+ad_subs = subject_meta$individualID[subject_meta$cond == 1]
+
+n_boots = 1000
+
+gsva_res_ad_rand = as.data.frame(matrix(rnorm(n_boots*length(ad_subs)), nrow = n_boots))
+colnames(gsva_res_ad_rand) = ad_subs
+
+# #HALVES:
+# pathway_groups_ad <- apply(gsva_res_ad_rand, 1, function(scores) {
+#   med <- median(scores, na.rm = TRUE)   # median as threshold
+#   ifelse(scores >= med, "high", "low")
+# })
+#Tertiles
+pathway_groups_ad <- apply(gsva_res_ad_rand, 1, function(scores) {
+  qs <- quantile(scores, probs = c(1/3, 2/3), na.rm = TRUE)
+
+  out = cut(
+    scores,
+    breaks = c(-Inf, qs[1], qs[2], Inf),
+    labels = c("low", "middle", "high"),
+    include.lowest = TRUE
+  )
+  names(out) <-names(scores)
+  out
+})
+table(pathway_groups_ad[, 1])
+
+#Join subject metadata to pathway score information
+pathway_w_meta_ad = merge(pathway_groups_ad, subject_meta, by.x = 0, by.y= "individualID") %>% column_to_rownames(var = "Row.names")
+
+#subset s_obj to have only AD cells:
+s_ad <- subset(s_obj, subset = cond_cogdx == 1)
+table(s_ad$cond_cogdx)
+
+#---------------------------------------------------------------------------
+# #Loop through all the pathways and create pb and variance matrices for each,
+#We will store these so I only have to do it once.
+
+pb_var_list = list()
+for(i in 1:ncol(pathway_groups_ad)){
+
+pathway_name = colnames(pathway_w_meta_ad)[i]
+message("Analyzing ", pathway_name)
+
+# #WW test
+# subject_strat = pathway_w_meta_ad[,i]
+# times_split = split(pathway_w_meta_ad$times, subject_strat)
+# test <- list(high = circular(times_split$high,
+#                  units="radians"),
+#   low = circular(times_split$low,
+#                      units="radians")
+# )
+# ww_test_res = circular::watson.wheeler.test(test)
+# if(ww_test_res$p.value < 0.05){
+#    message(pathway_name , " ww_test < 0.05, skipping.")
+#    next # Skips the rest of the current iteration
+# }
+# #cosinor test
+# gsva_score = gsva_res_ad_rand[i,]
+# stopifnot(all.equal(rownames(pathway_w_meta_ad), names(gsva_score)))
+# times = unname(unlist(as.numeric(pathway_w_meta_ad$times)))
+# gsva_score = unname(unlist(as.numeric(gsva_score)))
+# base = lm(gsva_score ~ 1)
+# full = lm(gsva_score ~ cos(times) + sin(times))
+# anova_res = anova(base, full)
+# p_val = anova_res$`Pr(>F)`[2]
+# if(p_val < 0.05){
+#    message(pathway_name , " cosinor pval < 0.05, skipping.")
+#    # plot(times, gsva_score, main = pathway_name)
+#    next # Skips the rest of the current iteration
+# }
+
+# Add the new metadata to the Seurat object
+stopifnot(!anyDuplicated(rownames(pathway_w_meta_ad)))
+s_ad$strat <- pathway_w_meta_ad[match(s_ad$orig.ident, rownames(pathway_w_meta_ad)), i]
+table(s_ad$strat, useNA = "ifany")
+
+orpheus_input_i = calculate_orpheus_inputs(s_ad, groups_to_analyze = unique(s_ad$strat), grouping_var = "strat")
+
+orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+input_i =  list("tmm" = orpheus_input_sans_counts)
+names(input_i) = pathway_name
+pb_var_list <- append(pb_var_list, input_i)
+
+}
+# save(pb_var_list, file ="~/Desktop/rosmap_exc35_ad_pb_var_matrices_list_randomAssignment_for_null_dist_tertiles_1000trials.RData")
+
+load("./figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ADPATHWAY_NoCosinorFilter_pb_var_matrices_list_randomAssignment_for_null_dist_tertiles_1000trials.RData")
+load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+
+#---------------BEGIN new technique: cycling together--------------------  
+# run cycling on the high and low groups together (concatenated pseudobulk, etc.) to find which genes I will test by my normal cutoffs, then do Orpheus for those genes without any cutoffs.
+
+
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+# This ensures stopCluster runs even if the code below crashes!
+on.exit(stopCluster(cl))
+
+orpheus_input_i = pb_var_list[[1]]
+
+# #For HALVES
+# pb_combined  <- cbind(orpheus_input_i$high$pseudobulk_tmm_matrix, orpheus_input_i$low$pseudobulk_tmm_matrix)
+# 
+# var_combined <- cbind(orpheus_input_i$high$var_df, orpheus_input_i$low$var_df)
+#For Tertiles:
+pb_combined  <- cbind(orpheus_input_i$high$pseudobulk_tmm_matrix,
+                      orpheus_input_i$middle$pseudobulk_tmm_matrix,
+                      orpheus_input_i$low$pseudobulk_tmm_matrix)
+
+var_combined <- cbind(orpheus_input_i$high$var_df,
+                      orpheus_input_i$middle$var_df,
+                      orpheus_input_i$low$var_df)
+
+stopifnot(all.equal(colnames(var_combined), colnames(pb_combined)))
+
+
+meta_data_combined <- subject_meta[match(colnames(pb_combined), subject_meta$individualID), ]
+
+# #HALVES
+# meta_data_combined$group = c(rep("high",
+#       ncol(orpheus_input_i$high$pseudobulk_tmm_matrix)),
+#       rep("low",ncol(orpheus_input_i$low$pseudobulk_tmm_matrix) ))
+
+#TERTILES
+meta_data_combined$group = c(rep("high",ncol(orpheus_input_i$high$pseudobulk_tmm_matrix)),
+      rep("middle", ncol(orpheus_input_i$middle$pseudobulk_tmm_matrix)),
+      rep("low",ncol(orpheus_input_i$low$pseudobulk_tmm_matrix) ))
+times_combined = meta_data_combined$times
+
+pb_cycling = is_cycling_custom(times_combined, pb_combined, meta_data = meta_data_combined, time_units = "rad")
+
+pb_cycling_filt = filter(pb_cycling, as.numeric(amp_ratio) >=0.20 & as.numeric(BHQ) < 0.1)
+
+pb_phases = as.numeric(unname(unlist(pb_cycling_filt$acrophase_bulk)))
+
+#Subset the pseudobulk and variance matrices so I can save time not running var_cycling on non-cycling genes.
+pb_combined_subset = pb_combined[pb_cycling_filt$Gene_Symbols,]
+var_combined_subset = var_combined[pb_cycling_filt$Gene_Symbols,]
+stopifnot(all.equal(rownames(pb_combined_subset), rownames(var_combined_subset)))
+
+var_cyclers = var_cycling_custom_fixed_acro(times = times_combined, 
+    var_mat = var_combined_subset,
+    mean_mat = pb_combined_subset,    
+    phase_pb =  pb_phases,
+    meta_data = meta_data_combined,
+    time_units = "rad")
+
+
+#Which genes should I extract a phi from?
+bulk_thr_cutoff = 0.5  
+
+keep_genes = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var","_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var) %>%
+    select(Gene_Symbols) %>%
+    unname %>%
+    unlist
+
+#---------------END new technique: cycling together--------------------
+phi_outputs = list()
+stat_tests = list()
+for(pathway_name in names(pb_var_list)){
+orpheus_input_i = pb_var_list[[pathway_name]]
+
+cluster_phis = list()
+for(cell_type in names(orpheus_input_i)){
+print(paste("Analyzing condition", cell_type))
+tmp = orpheus_input_i[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+# stopifnot(all.equal(times, meta_data$times))
+stopifnot(all(meta_data$cond == 1)) #Are all subjects ad?
+
+pb_mat_keep = pb_mat[keep_genes, ]
+var_mat_keep = var_mat[keep_genes, ]
+
+stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat_keep, meta_data, time_units = "rads")
+# write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+
+stopifnot(all.equal(pb_cycling_custom$Gene_Symbols , rownames(var_mat_keep)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+
+input_cos_cust = var_cyclers_cust %>%
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(Gene_Symbols %in% keep_genes) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    # column_to_rownames("Gene_Symbols")%>%
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+#Combine 'low' and 'high' groups
+phi_results_i <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+#----- plotting ------
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+color_palette <- c("high" = "deepskyblue", "low" = "orange", "middle" = "salmon")
+
+# Create the plot
+p <- phi_results_i %>% mutate(Source = factor(Source, levels = c("high", "middle", "low"))) %>%
+  ggplot(aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+    stat_compare_means(method = "kruskal.test") +
+
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("high", "low")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = pathway_name,
+    y = "Phase Dispersion (hrs)",
+    x = "Pathway stratification"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  ylim(c(0,8))
+#print(p)
+ggsave(paste0("~/Desktop/rosmap_exc35_null_dist_ad/exc35_phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
+
+
+phi_output_i =  list("tmm" = phi_results_i)
+names(phi_output_i) = pathway_name
+phi_outputs <- append(phi_outputs, phi_output_i)
+
+# w_test = wilcox.test(phi~Source, data = phi_results_i)
+# w_test_paired = wilcox.test(phi~Source, data = phi_results_i)
+# tests = list( list("wilcox" = w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+
+# k_test = kruskal.test(phi~Source, data = phi_results_i)
+# pairwise_w_test = pairwise.wilcox.test(phi_results_i$phi, phi_results_i$Source, p.adjust.method = "BH")
+# tests = list( list("kruskal" = k_test, "pairwise.wilcox" = pairwise_w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+
+}
+
+all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
+
+save(phi_outputs, file = "~/Desktop/rosmap_exc35_null_dist_ad/rosmap_exc35_ad_pathway_phis.RData")
+save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_null_dist_ad/rosmap_exc35_ad_pathway_phis_df.RData")
+
+stopCluster(cl)
+# wilcox_pvals <- sapply(stat_tests, function(x) x[["wilcox"]][["p.value"]])
+# wilcox_W <- sapply(stat_tests, function(x) x[["wilcox"]][["statistic"]])
+# wilcox.df = data.frame("pval" = wilcox_pvals, test_stat =wilcox_W , "BHQ" = p.adjust(wilcox_pvals, method = "BH"))
+# save(wilcox.df, file = "~/Desktop/rosmap_exc35_null_dist_ad/wilcox_df.RData")
+
+
+# kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
+# kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
+# save(kruskal.df, file = "~/Desktop/rosmap_exc35_pathways_ad/kruskal_df.RData")
+# save(stat_tests, file = "~/Desktop/rosmap_exc35_pathways_ad/stats_test.RData")
+```
+
+##### Calculate significance of AD pathways from empirical dist:
+
+```{r}
+load("./figures/rosmap_exc35/pathway_approach2/rosmap_exc35_null_dist_ad_1000tertiles_noCosinorFiltering/rosmap_exc35_ad_pathway_phis.RData")
+
+
+any(table(names(phi_outputs)) !=1)
+
+ad_null_data_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, pathway = .y)) %>%
+  mutate(Source = factor(Source, levels = c("high","middle", "low")))
+
+#Unpaired version:
+null_stats_df <- ad_null_data_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  group_by(pathway) %>%
+  summarise(
+    n_high = sum(Source == levels(Source)[1]),
+    n_medium = sum(Source == levels(Source)[2]),
+    n_low = sum(Source == levels(Source)[3]),
+    #p_value = wilcox.test(phi ~ Source)$p.value,
+    #statistic = wilcox.test(phi ~ Source)$statistic,
+    med_high = median(phi[Source == levels(Source)[1]]),
+    med_medium = median(phi[Source == levels(Source)[2]]),
+    med_low = median(phi[Source == levels(Source)[3]]),
+    .groups = "drop"
+  ) %>% #mutate(normed_stat = statistic/(n_low*n_high)) %>%
+  mutate(med_diff = med_high - med_low) %>%
+  mutate(abs_med_diff = abs(med_diff))
+
+cutoffs = quantile(null_stats_df$abs_med_diff, probs = c(0.95, 0.99))
+
+load("figures/rosmap_exc35/pathway_approach2/hallmark_ad_tertiles_mnsize30_noCosinorFiltering/rosmap_exc35_ad_pathway_phis.RData")
+
+ad_all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, pathway = .y)) %>%
+  mutate(Source = factor(Source, levels = c("high","middle", "low")))
+
+#Unpaired version:
+ad_stats_df <- ad_all_pathway_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  group_by(pathway) %>%
+  summarise(
+    n_high = sum(Source == levels(Source)[1]),
+    n_medium = sum(Source == levels(Source)[2]),
+    n_low = sum(Source == levels(Source)[3]),
+    #p_value = wilcox.test(phi ~ Source)$p.value,
+    #statistic = wilcox.test(phi ~ Source)$statistic,
+    med_high = median(phi[Source == levels(Source)[1]]),
+    med_medium = median(phi[Source == levels(Source)[2]]),
+    med_low = median(phi[Source == levels(Source)[3]]),
+    .groups = "drop"
+  ) %>% #mutate(normed_stat = statistic/(n_low*n_high)) %>%
+  mutate(med_diff = med_high - med_low) %>%
+  mutate(abs_med_diff = abs(med_diff)) %>%
+  mutate(sig_05 = ifelse(abs_med_diff > cutoffs[1], T, F)) %>%
+  mutate(sig_01 = ifelse(abs_med_diff > cutoffs[2], T, F))
+
+
+p_empirical <- function(x, null_vec) {
+  (sum(null_vec >= x) + 1) / (length(null_vec) + 1)
+}
+ad_stats_df$p_value <- sapply(ad_stats_df$abs_med_diff, p_empirical, null_vec = null_stats_df$abs_med_diff)
+ad_stats_df$BHQ = p.adjust(ad_stats_df$p_value, method = "BH")
+
+# write.table(ad_stats_df, file = "./figures/rosmap_exc35/pathway_approach2/hallmark_ad_tertiles_mnsize30_noCosinorFiltering/rosmap_exc35_ad_pathways_significance_result.csv", sep = ",", row.names = F)
+
+```
+
+### Paired, non-parametric tests of phi between high and low groups:
+
+```{r}
+load("figures/rosmap_exc35/pathway_analysis/hallmark_kegg_together_ctl_halves_mnsize10/rosmap_exc35_ctl_pathway_phis.RData")
+
+ctl_all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, pathway = .y)) %>%
+  mutate(Source = factor(Source, levels = c("high", "low")))
+
+#Unpaired version:
+wilcox_unpaired <- ctl_all_pathway_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  group_by(pathway) %>%
+  summarise(
+    n_low = sum(Source == levels(Source)[1]),
+    n_high = sum(Source == levels(Source)[2]),
+    p_value = wilcox.test(phi ~ Source)$p.value,
+    statistic = wilcox.test(phi ~ Source)$statistic,
+    .groups = "drop"
+  )%>% mutate(normed_stat = statistic/(n_low*n_high))
+
+```

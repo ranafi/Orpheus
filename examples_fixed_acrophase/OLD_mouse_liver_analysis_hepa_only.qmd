@@ -1,0 +1,3842 @@
+---
+title: "Mouse_liver"
+format: html
+editor: visual
+---
+
+### Read in Downloaded GEO counts:
+
+```{r}
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+library(Orpheus)
+seurat_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object.Rds")
+
+seurat_obj$seurat_clusters = seurat_obj$all_cell_types
+```
+
+show clustering:
+
+```{r}
+DimPlot(seurat_obj, reduction = "umap", group.by = "all_cell_types")
+```
+
+Add ZT information to Seurat object:
+
+```{r}
+table(seurat_obj$orig.ident)
+
+matches <- stringr::str_match(seurat_obj$orig.ident , "ZT(\\d+)$")
+ZT = as.numeric(matches[,2])
+seurat_obj$ZT = ZT
+VlnPlot(seurat_obj, features = c("nCount_RNA"), group.by = "ZT")
+
+
+table(seurat_obj$seurat_clusters, seurat_obj$orig.ident)
+```
+
+### What are reasonable params for my simulated data?
+
+```{r}
+s_obj = subset(seurat_obj, subset = all_cell_types %in% c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes"))
+
+s_obj = prepare_seurat_for_orpheus(seurat_obj = s_obj, assay = "RNA")
+
+tmp = calculate_orpheus_inputs(s_obj, groups_to_analyze = "hepatocytes 1", grouping_var = "seurat_clusters")
+
+
+hep2 = tmp$`hepatocytes 1`
+pb_mat = hep2[[1]]
+var_mat = hep2[[2]]
+counts = hep2[[3]]
+dim(counts)
+
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+plot(log(means), log(vars))
+theta_estimate = data.frame(coarse_theta = (vars-means)/means^2)
+summary(theta_estimate$coarse_theta)
+summary(means)
+
+#Reasonable estimates for theta: 0.1 - 1.5
+quantile(theta_estimate$coarse_theta, probs = c(0.05, .95))
+
+#Reasonable range for gene means (G): 0.1 - 5
+quantile(means, probs = c(0.05, .95))
+
+cyclers = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
+cyclers$p_statistic = as.numeric(cyclers$p_statistic)
+
+#What fraction of genes should I make rhythmic? 0.10
+sig_cyclers = dplyr::filter(cyclers, p_statistic < 0.05)
+sig_cyclers %>% nrow / nrow(cyclers)
+
+#Reasonable range for cycling amplitude_ratio?: 0.15 - 0.75
+quantile(as.numeric(sig_cyclers$amp_ratio), probs = c(0.05, 0.95))
+
+```
+
+### Now do Methods of Moments analysis (ORPHEUS)
+
+Here we assign cells of each subject to one of two pseudoreplicates, we will do this 4 times and consider results found in all four folds.
+
+```{r}
+# s_obj = subset(seurat_obj, subset = all_cell_types %in% c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes"))
+# 
+# s_obj = prepare_seurat_for_orpheus(seurat_obj = s_obj, assay = "RNA")
+# saveRDS(s_obj, file = "../../Mouse_liver_data/liver_timecourse_seurat_object_hepa_only_ORPHEUS_norm.Rds")
+s_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object_hepa_only_ORPHEUS_norm.Rds")
+
+seeds <- c(1,2,3,4)
+#Initialize an empty list to store all results
+all_results_combined <- list()
+for(i in seeds){
+  message(paste("--- Running ORPHEUS with seed:", i, "---"))
+    
+    # returns a list like: list('CellTypeA' = ..., 'CellTypeB' = ...)
+    results_one_seed <- calculate_orpheus_inputs(
+      s_obj, 
+      groups_to_analyze = unique(s_obj$seurat_clusters), 
+      grouping_var = "seurat_clusters", 
+      num_replicates = 2, 
+      random_seed = i
+    )
+    
+    # Modify the names to include the seed identifier
+    # prevents name clashes when we combine the lists.
+    original_names <- names(results_one_seed)
+    new_names <- paste0(original_names, "_seed", i)
+    names(results_one_seed) <- new_names
+    
+    # Append the newly named results to main list
+    all_results_combined <- c(all_results_combined, results_one_seed)
+}
+# Check the names of the final combined list
+print("Names of the final combined list:")
+print(names(all_results_combined))
+#save(all_results_combined, file = "mouse_liver_4_seeds_pb_var_counts_hepatocytes_only_normed_list.RData")
+#######Load results from above #######
+load("mouse_liver_4_seeds_pb_var_counts_hepatocytes_only_normed_list.RData")
+
+cluster_phis = list()
+for(cell_type in names(all_results_combined)){
+  
+print(paste("Analyzing", cell_type))
+
+
+# tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
+tmp = all_results_combined[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Variance of NB is var = mean + mean^2*theta
+#rearrange to solve for theta = (var-mean)/mean^2
+time_wise_theta_meas <- as.data.frame(mapply(function(v,m){(v-m)/m^2}, var_mat, pb_mat))
+rownames(time_wise_theta_meas) = rownames(pb_mat)
+colnames(time_wise_theta_meas) = paste0(colnames(time_wise_theta_meas), "_theta_meas")
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
+
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+if(length(unique(diff(ZT))[unique(diff(ZT)) != 0]) != 1 || length(unique(ZT)) < 6){
+  print("Cell does not have time points suitable for analysis")
+  next
+}
+
+#Call cosinor regression methods, where phases of variance wave are NOT fixed:
+pb_cycling = is_cycling(ZT, pb_mat)
+
+all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
+phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
+
+#hist(as.numeric(phase_pb))
+
+var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb)
+
+input_cos = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+
+phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+
+output_cos_tmm = merge(phi, input_cos, by = 0)
+output = merge(output_cos_tmm, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
+output = merge(output, agg_theta_meas, by.x = "Row.names", by.y = 0)
+
+
+local_res =  list("tmm" = output)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+```
+
+### Combine lists from different celltypes/pseudoreplicates and plot
+
+```{r}
+cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+# save(cos_phis_tmm, file = "~/Desktop/phis_2pr_4folds_unfilt_fixed_acro_hepa_normed.RData")
+```
+
+### Fold Averaging seeds
+
+```{r}
+load("figures/mouse_liver/norming_w_hepatocyte_cells/phis_2pr_4folds_unfilt_fixed_acro_hepa_normed.RData")
+
+cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi) & fund_mean_coeff >=0)
+table(cos_phis_tmm_filt$Source)
+
+phis_filt <- cos_phis_tmm_filt %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed")
+
+phis_consensus = phis_filt %>%
+  group_by(cell, Row.names) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+
+#Now phis_consensus has repeat genes for each "seed"
+#gene count by cell type:
+phis_consensus %>% group_by(cell) %>% summarize(n_genes = n_distinct(Row.names))
+
+pval_cols = c("p_statistic", "double_freq_p_statistic")
+phis_seed_avg <- phis_consensus %>%
+  select(!contains("acrophase") & !contains("AIC") & !contains("BIC")) %>%
+  group_by(cell, Row.names) %>%
+  summarise(
+    across(all_of(pval_cols), max, na.rm = TRUE),
+    across(where(is.numeric) & !all_of(pval_cols), \(x) mean(x, na.rm = T)),
+    cell = first(cell),
+    .groups = "drop"
+  ) #%>% filter(cell %in% c("hepatocytes 1","hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes"))
+
+#save(phis_seed_avg, file = "~/Desktop/phis_2pr_4folds_seed_avg_fixed_acro_hepa_normed.RData")
+```
+
+### Load Phis_seed_avg object
+
+```{r}
+load("figures/mouse_liver/norming_w_hepatocyte_cells/phis_2pr_4folds_seed_avg_fixed_acro_hepa_normed.RData")
+```
+
+### Plotting
+
+```{r}
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+
+liver_phi_boxplot_pseudorep = phis_seed_avg %>%
+  filter(cell %in% c("hepatocytes 1", "hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes"))%>%
+  ggplot( aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outlier.shape = NA)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(alpha = 0.5,
+      position = position_jitter(width = jitter_width, seed = jitter_seed)
+   ) +
+  scale_fill_manual(values = custom_colors) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )
+
+ggsave("~/Desktop/liver_phi_boxplot_pseudorep.pdf", liver_phi_boxplot_pseudorep, device = "pdf", width = 8, heigh = 6)
+
+kruskal.test(phi ~ cell, data = phis_seed_avg)
+pairwise.wilcox.test(phis_seed_avg$phi, phis_seed_avg$cell,
+                 p.adjust.method = "BH")
+
+# acrodiff_compare_pseudorep = ggplot(phis_seed_avg, aes(x = acrodiff*12/pi, fill = cell)) +
+#   geom_histogram(binwidth = 2, color = "black", alpha = 1, breaks = seq(0, 12, by = 2)) +
+#   facet_wrap(~ as.factor(cell), scales = "free_y", nrow = 2) +
+#   scale_fill_manual(values = custom_colors) +
+#   guides(fill = "none") +    # remove fill legend
+#   xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
+#   ylab("Count")+
+#   theme_bw()+
+#   theme(
+#     strip.background = element_blank(),
+#     strip.text = element_text(color = "black", size = 12),
+#     axis.text.x = element_text(size = 14),    # Increase x-axis text size
+#     axis.text.y = element_text(size = 14),    # Increase y-axis text size
+#     axis.title.x = element_text(size = 16),   # Increase x-axis title size
+#     axis.title.y = element_text(size = 16),   # Increase y-axis title size
+#     legend.title = element_text(size = 12)    # Increase legend title size
+#   )+
+#    # Use scale_x_continuous for precise control over the x-axis
+#   scale_x_continuous(
+#     limits = c(0, 12), 
+#     breaks = seq(0, 12, by = 4), 
+#     expand = c(0, 0)
+#   )
+# 
+# ggsave("~/Desktop/acrodiff_compare_pseudorep.pdf", plot = acrodiff_compare_pseudorep, device = "pdf", width =6, height = 7, units = "in") 
+
+
+gene_sets <- phis_seed_avg %>%
+  group_by(cell) %>%
+  summarise(genes = list(unique(Row.names))) %>%
+  deframe()
+
+liver_venn = ggvenn::ggvenn(gene_sets, fill_color = c("#E69F00", "#56B4E9", "#F8766D","#F0E442"), fill_alpha = 0.5)
+ggsave("~/Desktop/liver_gene_Venn.pdf", plot = liver_venn, device = "pdf", width = 7, height = 7)
+
+
+#size of the intersect between all the cell types
+intersect_matrix <- outer(gene_sets, gene_sets,
+                          Vectorize(function(x, y) length(intersect(x, y))))
+dimnames(intersect_matrix) <- list(names(gene_sets), names(gene_sets))
+intersect_matrix
+
+peri_overlap = intersect(gene_sets$`pericentral hepatocytes`, gene_sets$`periportal hepatocytes`)
+
+peri_df = filter(phis_seed_avg, cell %in% c("pericentral hepatocytes","periportal hepatocytes" ) & Row.names %in% peri_overlap)
+
+pp_phi_compare_pseudorep = ggplot(peri_df, aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+ggsave("~/Desktop/periportal_vs_pericentral_phi_same_genes.pdf", pp_phi_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+pp_ac_compare_pseudorep = ggplot(peri_df, aes(x = cell,y =  Ac, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted cell rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+ggsave("~/Desktop/periportal_vs_pericentral_Ac_same_genes.pdf", pp_ac_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+pp_bulk_amp_compare_pseudorep = ggplot(peri_df, aes(x = cell,y =  amplitude_bulk, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Measured bulk rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/periportal_vs_pericentral_bulk_amp_same_genes.pdf", pp_bulk_amp_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+peri_test_df <- peri_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = cell, values_from = c(phi, Ac))
+
+wilcox.test(peri_test_df$`phi_periportal hepatocytes`, peri_test_df$`phi_pericentral hepatocytes`, paired = T)
+
+wilcox.test(peri_test_df$`Ac_periportal hepatocytes`, peri_test_df$`Ac_pericentral hepatocytes`, paired = T)
+
+############### hepatocytes ########
+hepa_overlap = intersect(gene_sets$`hepatocytes 1`, gene_sets$`hepatocytes 2`)
+
+hepa_df = filter(phis_seed_avg, cell %in% c("hepatocytes 1","hepatocytes 2" ) & Row.names %in% hepa_overlap)
+
+hepa_phi_compare_pseudorep = ggplot(hepa_df, aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_phi.pdf", hepa_phi_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa_ac_compare_pseudorep = ggplot(hepa_df, aes(x = cell,y =  log(Ac), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(prediceted cell rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_Ac.pdf", hepa_ac_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa_bulk_amp_compare_pseudorep = ggplot(hepa_df, aes(x = cell,y =  log(amplitude_bulk), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(measured bulk rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_bulk_amp.pdf", hepa_bulk_amp_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa_test_df <- hepa_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = cell, values_from = c(phi, Ac, amplitude_bulk))
+
+wilcox.test(hepa_test_df$`phi_hepatocytes 1`, hepa_test_df$`phi_hepatocytes 2`, paired = T)
+
+wilcox.test(hepa_test_df$`Ac_hepatocytes 1`, hepa_test_df$`Ac_hepatocytes 2`, paired = T)
+
+wilcox.test(hepa_test_df$`amplitude_bulk_hepatocytes 1`, hepa_test_df$`amplitude_bulk_hepatocytes 2`, paired = T)
+
+#----------------------------
+hepa1_periport_overlap = intersect(gene_sets$`hepatocytes 1`, gene_sets$`periportal hepatocytes`)
+
+hepa1_portal_df = filter(phis_seed_avg, cell %in% c("hepatocytes 1","periportal hepatocytes" ) & Row.names %in% hepa1_periport_overlap)
+
+hepa1_portal_phi_compare_pseudorep = ggplot(hepa1_portal_df, aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPeriportal_same_genes_phi.pdf", hepa1_portal_phi_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_portal_ac_compare_pseudorep = ggplot(hepa1_portal_df, aes(x = cell,y =  log(Ac), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(prediceted cell rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPeriportal_same_genes_Ac.pdf", hepa1_portal_ac_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_portal_bulk_amp_compare_pseudorep = ggplot(hepa1_portal_df, aes(x = cell,y =  log(amplitude_bulk), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(measured bulk rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPortal_same_genes_bulk_amp.pdf", hepa1_portal_bulk_amp_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_portal_test_df <- hepa1_portal_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = cell, values_from = c(phi, Ac, amplitude_bulk))
+
+wilcox.test(hepa1_portal_test_df$`phi_hepatocytes 1`,hepa1_portal_test_df$`phi_periportal hepatocytes`, paired = T)
+
+wilcox.test(hepa1_portal_test_df$`Ac_hepatocytes 1`, hepa1_portal_test_df$`Ac_periportal hepatocytes`, paired = T)
+
+wilcox.test(hepa1_portal_test_df$`amplitude_bulk_hepatocytes 1`, hepa1_portal_test_df$`amplitude_bulk_periportal hepatocytes`, paired = T)
+
+#--------------------------------
+hepa1_pericent_overlap = intersect(gene_sets$`hepatocytes 1`, gene_sets$`pericentral hepatocytes`)
+
+hepa1_central_df = filter(phis_seed_avg, cell %in% c("hepatocytes 1","pericentral hepatocytes" ) & Row.names %in% hepa1_pericent_overlap)
+
+hepa1_central_phi_compare_pseudorep = ggplot(hepa1_central_df, aes(x = cell,y =  phi*12/pi, fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPericentral_same_genes_phi.pdf", hepa1_central_phi_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_central_ac_compare_pseudorep = ggplot(hepa1_central_df, aes(x = cell,y =  log(Ac), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(prediceted cell rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vPericentral_same_genes_Ac.pdf", hepa1_central_ac_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+hepa1_central_bulk_amp_compare_pseudorep = ggplot(hepa1_central_df, aes(x = cell,y =  log(amplitude_bulk), fill = cell))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Log(measured bulk rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1vCentral_same_genes_bulk_amp.pdf", hepa1_central_bulk_amp_compare_pseudorep, device = "pdf", width = 5, height = 5)
+
+
+hepa1_central_test_df <- hepa1_central_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = cell, values_from = c(phi, Ac, amplitude_bulk))
+
+wilcox.test(hepa1_central_test_df$`phi_hepatocytes 1`,hepa1_central_test_df$`phi_pericentral hepatocytes`, paired = T)
+
+wilcox.test(hepa1_central_test_df$`Ac_hepatocytes 1`, hepa1_central_test_df$`Ac_pericentral hepatocytes`, paired = T)
+
+wilcox.test(hepa1_central_test_df$`amplitude_bulk_hepatocytes 1`, hepa1_central_test_df$`amplitude_bulk_pericentral hepatocytes`, paired = T)
+
+
+```
+
+### enrichR
+
+```{r}
+library(enrichR)
+dbs <- c("MSigDB_Hallmark_2020", "KEGG_2019_Mouse", "KEGG_2021_Human", "WikiPathways_2024_Mouse", "Reactome_Pathways_2024")
+
+run_enrichR = function(phi_df, dbs, prop = 0.5){
+  websiteLive <- getOption("enrichR.live")
+  
+  top_frac = arrange(phi_df, phi) %>% slice_head(prop = prop) %>% select(Row.names) %>% unname %>% unlist
+  
+  bottom_frac = arrange(phi_df, phi) %>% slice_tail(prop = prop) %>% select(Row.names) %>% unname %>% unlist
+  
+  background = phi_df %>% select(Row.names) %>% unname %>% unlist
+  
+  if (websiteLive) {
+      # Replace 'Rank' with 'Overlap' column, calculated with GMT files
+      synchronized<- enrichr(top_frac, dbs, background = background, include_overlap = TRUE)
+      synchronized_df = do.call(rbind, synchronized) %>% arrange(P.value)
+      synchronized_df$group = "synch"
+      unsynch <-enrichr(bottom_frac, dbs, background = background, include_overlap = TRUE)
+      unsynch_df = do.call(rbind, unsynch) %>% arrange(P.value)
+      unsynch_df$group = "unsynch"
+
+     return(rbind(synchronized_df, unsynch_df))
+  }
+  
+}
+
+pathway_results = phis_seed_avg %>% group_by(cell) %>% group_modify(~run_enrichR(.x, dbs, prop = 0.5))
+
+save(pathway_results, file ="~/Desktop/enrichR_top_and_bottom_half_phi_overrepresentation.RData")
+```
+
+### Write out RNKs
+
+```{r}
+hepa1_rnk = filter(phis_seed_avg, cell == "hepatocytes 1") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(hepa1_rnk, file = "~/Desktop/Mouse_liver_hepa1.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa2_rnk = filter(phis_seed_avg, cell == "hepatocytes 2") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(hepa2_rnk, file = "~/Desktop/Mouse_liver_hepa2.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+pc_rnk = filter(phis_seed_avg, cell == "pericentral hepatocytes") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(pc_rnk, file = "~/Desktop/Mouse_liver_pc.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+pp_rnk = filter(phis_seed_avg, cell == "periportal hepatocytes") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(pp_rnk, file = "~/Desktop/Mouse_liver_pp.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+```
+
+### Repeat analysis above with slight change:
+
+Above, I had 4 cell types and 4 folds. I ran cycling on pb and variance signals, kept only significant genes within a fold and cell type. At the end, I averaged parameters of genes that had a real phi in all folds.
+
+Here, I will again have 4 cell types and 4 folds. I will run cycling on pb and variance signals (not worrying about a phi yet). Then genes that are significant in all 4 folds I will test in the full pseudobulk to get a phi estimate.
+
+```{r}
+#This pb and var list was created in the related analysis cell above.
+load("mouse_liver_4_seeds_pb_var_counts_hepatocytes_only_normed_list.RData")
+
+cluster_cyc_results = list()
+for(cell_type in names(all_results_combined)){
+  
+print(paste("Analyzing", cell_type))
+
+tmp = all_results_combined[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+if(length(unique(diff(ZT))[unique(diff(ZT)) != 0]) != 1 || length(unique(ZT)) < 6){
+  print("Cell does not have time points suitable for analysis")
+  next
+}
+
+#Call cosinor regression methods, where phases of variance wave are NOT fixed:
+pb_cycling = is_cycling(ZT, pb_mat)
+
+all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
+phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
+
+var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb)
+
+input_cos = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+local_res =  list("tmm" = input_cos)
+names(local_res) = cell_type
+cluster_cyc_results <- append(cluster_cyc_results, list(local_res))
+}
+
+cluster_cyc_df <- do.call(rbind, lapply(seq_along(cluster_cyc_results), function(source_name) {
+  current_df <- cluster_cyc_results[[source_name]][[1]]
+  current_df$Source <- names(cluster_cyc_results[[source_name]][1])
+  current_df
+}))
+
+
+cluster_cyc_df_filt = filter(cluster_cyc_df, fund_mean_coeff >=0)
+table(cluster_cyc_df_filt$Source)
+
+cell_seed_df <- cluster_cyc_df_filt %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed")
+
+genes_consensus = cell_seed_df %>%
+  group_by(cell, Gene_Symbols) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+```
+
+genes_consensus holds all the genes we will test for each cell type in the full pseudobulk (but 4 copies of each gene)
+
+```{r}
+# gene_list <- genes_consensus %>%
+#  group_by(cell) %>%
+#  summarise(genes = list(unique(Gene_Symbols)), .groups = "drop") %>%
+#  deframe()
+# 
+# save(gene_list, file = "figures/mouse_liver/norming_w_hepatocyte_cells/keep_genes_consinor_method2_cell_types_and_genes.RData")
+
+load("figures/mouse_liver/norming_w_hepatocyte_cells/keep_genes_consinor_method2_cell_types_and_genes.RData")
+```
+
+#### Now we take the psuedobulk, no pseudoreplicates and run cosinor regression on the genes specified in gene_list from above:
+
+```{r}
+s_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object_hepa_only_ORPHEUS_norm.Rds")
+
+all_cell_pb_var_list <- calculate_orpheus_inputs(
+      s_obj, 
+      groups_to_analyze = unique(s_obj$seurat_clusters), 
+      grouping_var = "seurat_clusters"
+    )
+
+setequal(names(all_cell_pb_var_list), names(gene_list))
+
+
+cluster_phis_mthd2 = list()
+for(cell_type in names(all_cell_pb_var_list)){
+keep_genes = gene_list[[cell_type]]
+  
+print(paste("Analyzing", cell_type))
+print(paste("Num genes in gene_list:", length(keep_genes)))
+
+tmp = all_cell_pb_var_list[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+stopifnot(all(keep_genes %in% rownames(pb_mat)))
+stopifnot(all(keep_genes %in% rownames(var_mat)))
+pb_mat = pb_mat[keep_genes,]
+var_mat = var_mat[keep_genes,]
+stopifnot(all.equal(rownames(pb_mat), keep_genes))
+stopifnot(all.equal(rownames(var_mat), keep_genes))
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
+ZT = as.numeric(matches[,2])
+print(ZT)
+
+
+pb_cycling = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
+
+phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
+
+stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
+stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
+
+phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
+
+var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
+
+input_cos = var_cyclers %>%
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(p_statistic < 0.05) %>%
+    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    # filter(amplitude_bulk >= bulk_amp_thr) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+stopifnot(nrow(input_cos) == length(keep_genes))
+ # Calculate phi parameters
+phi = input_cos %>%
+        apply(., 1, function(row) {
+            suppressWarnings(
+                 find_analytic(row[1], row[2], row[3], row[4])
+                 )
+        }) %>%
+        t %>%
+        as.data.frame
+
+colnames(phi) = c("G", "Ac", "theta", "phi")
+output = merge(phi, input_cos, by = 0)
+
+local_res =  list("tmm" = output)
+names(local_res) =cell_type
+cluster_phis_mthd2 <- append(cluster_phis_mthd2, list(local_res))
+}
+
+```
+
+#### Combine results from loop above
+
+```{r}
+cos_phis_tmm_mthd2 <- do.call(rbind, lapply(seq_along(cluster_phis_mthd2), function(source_name) {
+  current_df <- cluster_phis_mthd2[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis_mthd2[[source_name]][1])
+  current_df
+}))
+
+save(cos_phis_tmm_mthd2, file = "./figures/mouse_liver/norming_w_hepatocyte_cells/cosinor_mthd2/phis_2pr_4folds_unfilt_fixed_acro_hepa_normed_mthd2.RData")
+
+```
+
+#### plotting
+
+```{r}
+
+load("./figures/mouse_liver/norming_w_hepatocyte_cells/cosinor_mthd2/phis_2pr_4folds_unfilt_fixed_acro_hepa_normed_mthd2.RData")
+
+cos_phis_tmm_mthd2_filt = filter(cos_phis_tmm_mthd2, !is.na(phi) & fund_mean_coeff > 0)
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+
+liver_phi_boxplot_pseudorep = cos_phis_tmm_mthd2_filt %>%
+  ggplot( aes(x = Source,y =  phi*12/pi, fill = Source))+
+  geom_boxplot(outlier.shape = NA)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(alpha = 0.5,
+      position = position_jitter(width = jitter_width, seed = jitter_seed)
+   ) +
+  scale_fill_manual(values = custom_colors) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+scale_y_continuous(limits = c(0,8.5))
+
+ggsave("~/Desktop/liver_phi_boxplot_pseudorep_mthd2.pdf", liver_phi_boxplot_pseudorep, device = "pdf", width = 8, heigh = 6)
+
+kruskal.test(phi ~ Source, data = cos_phis_tmm_mthd2_filt)
+pairwise.wilcox.test(cos_phis_tmm_mthd2_filt$phi, cos_phis_tmm_mthd2_filt$Source,
+                 p.adjust.method = "BH")
+
+```
+
+#### enrichr
+
+```{r}
+library(enrichR)
+
+load("./figures/mouse_liver/norming_w_hepatocyte_cells/cosinor_mthd2/phis_2pr_4folds_unfilt_fixed_acro_hepa_normed_mthd2.RData")
+
+phi_df = filter(cos_phis_tmm_mthd2, !is.na(phi) & as.numeric(fund_mean_coeff) > 0 )
+
+dbs <- c("MSigDB_Hallmark_2020", "KEGG_2019_Mouse", "KEGG_2021_Human", "WikiPathways_2024_Mouse", "Reactome_Pathways_2024")
+
+run_enrichR = function(phi_df, dbs, prop = 0.5){
+  websiteLive <- getOption("enrichR.live")
+  
+  top_frac = arrange(phi_df, phi) %>% slice_head(prop = prop) %>% select(Row.names) %>% unname %>% unlist
+  
+  bottom_frac = arrange(phi_df, phi) %>% slice_tail(prop = prop) %>% select(Row.names) %>% unname %>% unlist
+  
+  background = phi_df %>% select(Row.names) %>% unname %>% unlist
+  
+  if (websiteLive) {
+      # Replace 'Rank' with 'Overlap' column, calculated with GMT files
+      synchronized<- enrichr(top_frac, dbs, background = background, include_overlap = TRUE)
+      synchronized_df = do.call(rbind, synchronized) %>% arrange(P.value)
+      synchronized_df$group = "synch"
+      unsynch <-enrichr(bottom_frac, dbs, background = background, include_overlap = TRUE)
+      unsynch_df = do.call(rbind, unsynch) %>% arrange(P.value)
+      unsynch_df$group = "unsynch"
+
+     return(rbind(synchronized_df, unsynch_df))
+  }
+  
+}
+
+pathway_results = phi_df %>% group_by(Source) %>% group_modify(~run_enrichR(.x, dbs, prop = 0.5))
+
+save(pathway_results, file ="~/Desktop/enrichR_top_and_bottom_half_phi_overrepresentation.RData")
+```
+
+Write out RNK
+
+```{r}
+hepa1_rnk = filter(phi_df, Source == "hepatocytes 1") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(hepa1_rnk, file = "~/Desktop/Mouse_liver_hepa1.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa2_rnk = filter(phi_df, Source == "hepatocytes 2") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(hepa2_rnk, file = "~/Desktop/Mouse_liver_hepa2.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+pc_rnk = filter(phi_df, Source == "pericentral hepatocytes") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(pc_rnk, file = "~/Desktop/Mouse_liver_pc.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+pp_rnk = filter(phi_df, Source == "periportal hepatocytes") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(pp_rnk, file = "~/Desktop/Mouse_liver_pp.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+```
+
+#### compare this method to method 1:
+
+```{r}
+load("./figures/mouse_liver/norming_w_hepatocyte_cells/cosinor_mthd2/phis_2pr_4folds_unfilt_fixed_acro_hepa_normed_mthd2.RData")
+
+load("./figures/mouse_liver/norming_w_hepatocyte_cells/phis_2pr_4folds_seed_avg_fixed_acro_hepa_normed.RData")
+
+phis_seed_avg$cell_gene = paste0(phis_seed_avg$cell, phis_seed_avg$Row.names)
+cos_phis_tmm_mthd2$cell_gene = paste0(cos_phis_tmm_mthd2$Source, cos_phis_tmm_mthd2$Row.names)
+
+x = list(mthd1_genes = phis_seed_avg$cell_gene, mthd2_genes = cos_phis_tmm_mthd2$cell_gene)
+ggvenn::ggvenn(x)+ ggtitle("All genes, all cell types (with Nan Phis)")
+
+mthd2_filt = filter(cos_phis_tmm_mthd2, !is.na(phi))
+mthd1_filt = filter(phis_seed_avg, !is.na(phi))
+
+x = list(mthd1_genes = mthd1_filt$cell_gene, mthd2_genes = mthd2_filt$cell_gene)
+ggvenn::ggvenn(x)+ ggtitle("Real Phi genes")
+
+plot_df = merge(phis_seed_avg, cos_phis_tmm_mthd2, by = "cell_gene", suffixes = c("_mthd1", "_mthd2"))
+
+ggplot(plot_df, aes(x = phi_mthd1, y = phi_mthd2))+
+  geom_point()
+```
+
+### BootEJTK: repeat analysis with Bootejtk:
+
+```{r}
+#Load all_results_combined
+load("mouse_liver_4_seeds_pb_var_counts_hepatocytes_only_normed_list.RData")
+
+
+write_bootejtk <- function(df, outfile) {
+  # Ensure data frame with GeneID as first column
+  df <- as.data.frame(df)
+  df <- cbind(GeneID = rownames(df), df)
+  
+  # Extract timepoints
+  timepoints <- colnames(df)[-1]   # skip GeneID
+  timepoints_clean = str_remove(timepoints, "_rep[0-9]+")
+  # BooteJTK requires a header like:
+  # #    ZT0   ZT4  ZT8 ...
+  header <- paste0("#\t", paste0(timepoints_clean, collapse = "\t"))
+  
+  # Write header
+  writeLines(header, con = outfile)
+  
+  # Append table
+  write.table(
+    df,
+    file       = outfile,
+    append     = TRUE,
+    quote      = FALSE,
+    sep        = "\t",
+    row.names  = FALSE,
+    col.names  = FALSE,
+    na         = "NA"
+  )
+}
+
+
+write_all_bootejtk <- function(nested_list, outdir) {
+  dir.create(outdir, showWarnings = FALSE)
+
+  keep_list = c()
+  # Determine which pb and var to keep based on if they have all timepoints
+  for(i in 1:length(nested_list)){
+    matches <- stringr::str_match(colnames(nested_list[[i]][[1]]) , "ZT(\\d+)")
+    ZT = as.numeric(matches[,2])
+    if ( length(ZT)==12){
+      if(all(ZT ==  rep(seq(3, 23, by = 4), each = 2))){
+              keep_list = append(names(nested_list[i]), keep_list)
+      }
+  }
+  }
+  nested_list = nested_list[keep_list]
+  all_tps = rep(seq(3, 23, by = 4), each = 2)
+  
+  for (name in names(nested_list)) {
+    item <- nested_list[[name]]
+    
+    df1 <- item[[1]]
+    matches <- stringr::str_match(colnames(df1) , "ZT(\\d+)")
+    ZT = as.numeric(matches[,2])
+    stopifnot(ZT == all_tps)
+    
+    # Write dataframe to its own file
+    outfile1 <- file.path(outdir, paste0(name, "_pb.txt"))
+
+    write_bootejtk(df1, outfile1)
+    # write_bootejtk(df2, outfile2)
+  }
+}
+write_all_bootejtk(all_results_combined,"~/Desktop/mouse_liver_pb/")
+```
+
+### Prepare variance signal for eJTK
+
+Now we need to isolate the 12-hr rhythms in variance to give to ejtk. Below I use regression to isolate the 12-hr components of variance 3 ways: modeling the variance without any priors about phase, and 2) using the phase from ejtk on bulk data, and 3) using y \~ pb residuals. In cases 1&2 I subtract out the contribution of variance from the 24-hr rhythm and non-rhythm.
+
+```{r}
+prepare_var_for_ejtk <- function(times, var_mat, mean_mat, pb_phase_file, pb_cycling_sig_cutoff = 0.05) {
+   cat(paste("\nPreparing variance data for eJTK, input times must be regularly spaced, e.g. 0-24 and in hrs units\n"))
+   if(length(setdiff(unique(diff(times)), 0)) != 1){
+     stop("Error: times must be regularly spaced in hrs units")
+   }
+  `%do%` <- foreach::`%do%`
+  pb_phases = read.delim(pb_phase_file, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  
+  sig_genes = dplyr::filter(pb_phases, as.numeric(GammaP)< pb_cycling_sig_cutoff)
+  
+  keep_genes = sig_genes$ID %>% unname %>% unlist
+  var_mat = var_mat[keep_genes,]
+  mean_mat = mean_mat[keep_genes,]
+  
+  # Transpose matrices to have subjects x genes
+  var_data <- t(var_mat)
+  means1 <- t(mean_mat)
+  times_rads = times * pi/12
+  # Initialize matrices to store the double freq signals, mean rhythms
+  double_freq_mat_free <- matrix(NA, nrow = ncol(var_data), ncol = nrow(var_data))
+  mean_rhythm_matrix_free <- matrix(NA, nrow = ncol(var_data), ncol = nrow(var_data))
+
+  double_freq_mat_fixed <- matrix(NA, nrow = ncol(var_data), ncol = nrow(var_data))
+  mean_rhythm_matrix_fixed <- matrix(NA, nrow = ncol(var_data), ncol = nrow(var_data))
+  
+  double_freq_mat_residual <- matrix(NA, nrow = ncol(var_data), ncol = nrow(var_data))
+  # pb_mat <- matrix(NA, nrow = ncol(var_data), ncol = nrow(var_data))
+  # var_mesor_values <- numeric(ncol(var_data))  # Store var_mesor for each gene
+  rownames(double_freq_mat_free) <- colnames(var_data)  # Gene names
+  colnames(double_freq_mat_free) <- rownames(var_data)  # Subject names
+  rownames(mean_rhythm_matrix_free) <- colnames(var_data)  # Gene names
+  colnames(mean_rhythm_matrix_free) <- rownames(var_data)  # Subject names
+  rownames(double_freq_mat_fixed) <- colnames(var_data)  # Gene names
+  colnames(double_freq_mat_fixed) <- rownames(var_data)  # Subject names
+  rownames(mean_rhythm_matrix_fixed) <- colnames(var_data)  # Gene names
+  colnames(mean_rhythm_matrix_fixed) <- rownames(var_data)  # Subject names
+  rownames(double_freq_mat_residual) <- colnames(var_data)  # Gene names
+  colnames(double_freq_mat_residual) <- rownames(var_data)  # Subject names
+  
+  rm_rows = c()
+  # Loop through genes to calculate the double-frequency component, mean rhythm, and pseudobulk rhythm
+  for (gene_i in 1:ncol(var_data)){
+    gene_symbol = colnames(var_data)[gene_i]
+    ejtk_bulk_phase = pb_phases$PhaseMean[pb_phases$ID == gene_symbol]
+    ejtk_bulk_phase_rads = ejtk_bulk_phase * pi / 12
+    stopifnot(ejtk_bulk_phase_rads >= 0 & ejtk_bulk_phase_rads <= 2*pi)
+    stopifnot(rlang::is_empty(ejtk_bulk_phase) == FALSE)
+    
+    gexp1 <- as.numeric(unlist(var_data[, gene_i]))
+    m1 <- as.numeric(unlist(means1[, gene_i]))
+
+    # Fit the variance model
+    var_model_free <- lm(gexp1 ~ sin(2 *times_rads) + cos(2 * times_rads) + m1)
+    design_matrix_free <- model.matrix(gexp1 ~ sin(2 * times_rads) + cos(2 * times_rads) + m1)
+
+
+    double_wave = cos(2 * (times_rads- pi/2 - ejtk_bulk_phase_rads))
+    var_model_fixed = lm(gexp1 ~ double_wave + m1)
+    design_matrix_fixed <- model.matrix(gexp1 ~ double_wave + m1)
+    
+    var_model_residual = lm(gexp1 ~ m1)
+
+
+    sv <- svd(design_matrix_free)$d
+    sv2 <- svd(design_matrix_fixed)$d
+    tol <- 1e-14
+    rankX <- sum(sv > tol)
+    rankX2 <- sum(sv2 > tol)
+    full <- ncol(design_matrix_free)
+    full2 <- ncol(design_matrix_fixed)
+
+    if (rankX < full || rankX2 < full2) {
+      # design matrix is rank-deficient -> at least one coef would be NA
+      # message(paste("Skipping gene", gene_symbol, "due to rank-deficient design matrix"))
+      rm_rows = append(gene_i, rm_rows)
+    }
+
+    if (var_model_free$coefficients[["m1"]] < 0 || var_model_fixed$coefficients[["m1"]] < 0 || var_model_residual$coefficients[["m1"]] < 0) {
+      # If the coefficient for m1 is negative, skip this gene
+      # message(paste("Skipping gene", colnames(var_data)[gene_i], "due to mean coefficient < 0 in variance model"))
+    rm_rows = append(gene_i, rm_rows)
+
+    } else {  
+    # var_mesor <- mean(var_model_free$fitted.values)
+    var_mesor_free <- mean(design_matrix_free[,-c(2, 3)] %*% var_model_free[["coefficients"]][-c(2,3)])
+    var_mesor_fixed <- mean(design_matrix_fixed[,-2] %*% var_model_fixed[["coefficients"]][-2])
+    # var_mesor_values[gene_i] <- var_mesor  # Store var_mesor for this gene
+
+    # Calculate the double frequency signal (double-frequency component)
+    circ <- gexp1 - design_matrix_free[, -c(2, 3)] %*% var_model_free[["coefficients"]][-c(2, 3)]
+    double_freq_mat_free[gene_i, ] <- circ
+
+    circ_fixed <- gexp1 - design_matrix_fixed[, -2] %*% var_model_fixed[["coefficients"]][-2]
+    double_freq_mat_fixed[gene_i, ] <- circ_fixed
+  
+    double_freq_mat_residual[gene_i, ] <- var_model_residual$residuals
+    
+    # Calculate the mean rhythm
+    mean_rhythm <- var_model_free$coefficients[["m1"]] * m1
+    mean_rhythm_matrix_free[gene_i, ] <- mean_rhythm
+
+    mean_rhythm_fixed <- var_model_fixed$coefficients[["m1"]] * m1
+    mean_rhythm_matrix_fixed[gene_i, ] <- mean_rhythm_fixed
+
+    # Calculate the pseudobulk rhythm (just m1)
+    # pb_mat[gene_i, ] <- m1
+    }
+  }
+  rm_rows = unique(rm_rows)
+  rm_genes = rownames(double_freq_mat_free)[rm_rows]
+  double_freq_mat_free = double_freq_mat_free[-rm_rows,]
+  double_freq_mat_fixed = double_freq_mat_fixed[-rm_rows,]
+  mean_rhythm_matrix_free = mean_rhythm_matrix_free[-rm_rows, ]
+  mean_rhythm_matrix_fixed = mean_rhythm_matrix_fixed[-rm_rows,]
+  double_freq_mat_residual = double_freq_mat_residual[-rm_rows,]
+  
+  
+  return(list(double_freq_mat_free = double_freq_mat_free, double_freq_mat_fixed = double_freq_mat_fixed, fund_rhythm_matrix_free = mean_rhythm_matrix_free, fund_rhythm_matrix_fixed = mean_rhythm_matrix_fixed, double_freq_mat_residual = double_freq_mat_residual, rm_genes = rm_genes))
+}
+
+outdir = "~/Desktop/test/"
+for(cell_type in names(all_results_combined)){
+  message(cell_type)
+  pb_mat = all_results_combined[[cell_type]]$pseudobulk_tmm_matrix
+  var_mat = all_results_combined[[cell_type]]$var_df
+  sample_times = stringr::str_remove(colnames(pb_mat),"ZT") %>%
+                stringr::str_remove(., "_rep[0-9]+") %>%
+                as.numeric
+  if(length(setdiff(unique(diff(sample_times)), 0)) != 1){
+     message(cell_type, " has irregular sample times, skipping.")
+    next
+   }
+  pb_filename = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/mouse_liver_pb/ejtk_pb_results/",cell_type,"_pb_Vash__boot10-rep2_GammaP.txt")
+  if(!file.exists(pb_filename)){
+    next
+  }
+  output_dfs = prepare_var_for_ejtk(sample_times, var_mat, pb_mat, pb_filename)
+  
+  # Get row names of the first data frame
+  first_df_rownames <- rownames(output_dfs[[1]])
+  
+  # Check if all data frames have the same row names as the first
+  all_same_rownames <- all(sapply(output_dfs[-6], function(df) identical(rownames(df), first_df_rownames)))
+  
+  stopifnot(all_same_rownames)
+
+  
+ for (name in names(output_dfs)[-6]) {
+    item <- output_dfs[[name]]
+    safe_name = stringr::str_replace(name, "/", "")
+    # Write each dataframe to its own file
+    outfile1 <- file.path(outdir, paste0(cell_type,'_', safe_name,".txt"))
+    write_bootejtk(item, outfile1)
+ }
+  outfile2 <- file.path(outdir, paste0("rm_genes_negative_mean_coeff_", cell_type,".txt"))
+
+ write.table(output_dfs[6], outfile2, sep = ",", row.names = F, col.names = F)
+
+}
+```
+
+#### Acrophase difference plots from BooteJTK non targeted:
+
+```{r}
+
+plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
+  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/mouse_liver_pb/ejtk_pb_results/",cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
+  # var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_var_nov26/", cell_type, "_double_freq_mat_free_Vash__boot10-rep4_GammaP.txt")
+    var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/mouse_liver_var/", cell_type, "_double_freq_mat_residual_Vash__boot10-rep4_GammaP.txt")
+
+  pb_jtk_res = read.delim(pb_path, sep = "\t")
+  var_jtk_res = read.delim(var_path, sep = "\t")
+
+  merged_res = merge(pb_jtk_res, var_jtk_res, by = "ID", suffixes = c("_pb", "_var"))
+
+  merged_filt = dplyr::filter(merged_res, GammaP_var < var_sig) %>% mutate(acrodiff = (PhaseMean_var - PhaseMean_pb) %% 12)
+
+ hist(merged_filt$acrodiff, main = cell_type, breaks = seq(0, 12, by = 2))
+}
+
+cell_types = c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes")
+
+filenames <- as.vector(outer(cell_types, paste0("_seed", 1:4), paste0))
+
+
+sapply(filenames, plot_free_acrodiff_ejtk, var_sig = 0.1)
+```
+
+#### Repeat above but slight change:
+
+for the untargeted, 12-hr variance rhythms, use the "all phase targeted results" this is where we searched for 12-hr rhythms of any phase, the difference between this and above in practice was that this method necessitates using the -B flag for BootEJTK
+
+```{r}
+
+plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
+  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/mouse_liver_pb/ejtk_pb_results/",cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
+  # var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_SCN_var_nov26/", cell_type, "_double_freq_mat_free_Vash__boot10-rep4_GammaP.txt")
+    var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/liver_targeted12rhythms_fixedAcroRegression_AllhrWidth/bashLoop_", cell_type, "_targeted_results_fixedAcroRegression_ALLhr_width.txt")
+
+  pb_jtk_res = read.delim(pb_path, sep = "\t")
+  var_jtk_res = read.delim(var_path, sep = "\t")
+
+  merged_res = merge(pb_jtk_res, var_jtk_res, by.x = "ID", by.y = "Gene", suffixes = c("_pb", "_var"))
+
+  merged_filt = dplyr::filter(merged_res, Pvalue < var_sig) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
+
+ hist(merged_filt$acrodiff, main = cell_type, breaks = seq(0, 12, by = 2))
+}
+
+cell_types = c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes")
+
+filenames <- as.vector(outer(cell_types, paste0("_seed", 1:4), paste0))
+
+
+sapply(filenames, plot_free_acrodiff_ejtk, var_sig = 0.1)
+```
+
+#### ORPHEUS on genes provided by BootEJTK
+
+Given significant cyclers from Bootejtk on pseudobulk, and targeted 12-hr rhythms in variance, rerun my regression, ignoring any significance cutoffs from regression. I will use the pseudobulk data from all cells not pseudoreplicates
+
+```{r}
+cell_types = c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes")
+
+filenames <- as.vector(outer(cell_types, paste0("_seed", 1:4), paste0))
+
+var_p_value = 0.05
+
+#Find the genes to test from Bootejtk. This will be the intersection of all folds:
+sig_ejtk_genes <- list()
+for(cell_type in filenames){
+  var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/liver_targeted12rhythms_ResidualRegression_2hrWidth/bashLoop_", cell_type, "_targeted_results_ResidualAcroRegression_2hr_width.txt")
+  SCN_var = read.delim(var_path)
+  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/mouse_liver_pb/ejtk_pb_results/", cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
+  SCN_pb = read.delim(pb_path)
+  
+  merged_res = merge(SCN_var, SCN_pb, by.x = "Gene", by.y = "ID", suffixes = c("_var", "_pb")) %>% filter(Pvalue < var_p_value & GammaP < 0.05) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
+  merged_res$Source = cell_type
+  
+  sig_ejtk_genes[[cell_type]] = merged_res
+}
+sig_ejtk_genes_df <- bind_rows(sig_ejtk_genes) %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed")
+
+consensus_sig_ejtk_genes_df = sig_ejtk_genes_df %>%
+  group_by(cell, Gene) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+
+consensus_unique <- consensus_sig_ejtk_genes_df %>%
+  select(cell, Gene, n_seeds) %>%
+  distinct()
+
+table(consensus_unique$cell)
+
+# test = Reduce(intersect, list(sig_ejtk_genes$`hepatocytes 1_seed1`$Gene, sig_ejtk_genes$`hepatocytes 1_seed2`$Gene, sig_ejtk_genes$`hepatocytes 1_seed3`$Gene, sig_ejtk_genes$`hepatocytes 1_seed4`$Gene))
+
+
+### We will test these genes in the full data (not pseudoreps) ###
+
+# seurat_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object_hepa_only_ORPHEUS_norm.Rds")
+# orpheus_inputs <- calculate_orpheus_inputs(
+#       seurat_obj,
+#       groups_to_analyze = unique(seurat_obj$seurat_clusters),
+#       grouping_var = "seurat_clusters"
+#     )
+# save(orpheus_inputs, file = "mouse_liver_pb_var_counts_hepatocytes_only_list.RData")
+load("mouse_liver_pb_var_counts_hepatocytes_only_list.RData")
+
+### Loop through pb and var and call ORPHEUS calc_phi ###
+cluster_phis = list()
+for(cell_type in c("periportal hepatocytes" , "hepatocytes 2" ,          "hepatocytes 1", "pericentral hepatocytes")){
+# cell_type_str = str_remove(cell_type, "/")
+message("Looking at celltype: ", cell_type)
+ejtk_sig_genes = consensus_unique %>% filter(cell == cell_type) %>% select(Gene) %>% unname %>% unlist
+  
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+stopifnot(all(ejtk_sig_genes %in% rownames(pb_mat)))
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
+ZT = as.numeric(matches[,2])
+# print(ZT)
+
+
+pb_cycling = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
+
+
+phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
+var_mat = var_mat[phase_pb$Gene_Symbols,]
+pb_mat = pb_mat[phase_pb$Gene_Symbols,]
+stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
+stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
+phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
+#hist(as.numeric(phase_pb))
+var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
+
+bulk_amp_thr = 0.5
+
+input_cos = var_cyclers %>%
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(p_statistic < 0.05) %>%
+    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= bulk_amp_thr) %>%
+    filter(Gene_Symbols %in% ejtk_sig_genes) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+ # Calculate phi parameters
+phi = input_cos %>%
+        apply(., 1, function(row) {
+            suppressWarnings(
+                 find_analytic(row[1], row[2], row[3], row[4])
+                 )
+        }) %>%
+        t %>%
+        as.data.frame
+
+colnames(phi) = c("G", "Ac", "theta", "phi")
+output = merge(phi, input_cos, by = 0)
+
+local_res =  list("tmm" = output)
+names(local_res) =cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+
+
+# cosine_vs_jtk = merge(vipgrp, input_cos, by.x = "Gene", by.y = 0)
+# plot(cosine_vs_jtk$PhaseMean, cosine_vs_jtk$acrophase_bulk*12/pi)
+# lines(c(0,100), c(0,100))
+# plot(cosine_vs_jtk$PhaseMean12, cosine_vs_jtk$acrophase_bulk)
+# lines(c(0,100), c(0,100))
+# plot(cosine_vs_jtk$Max_Amp_pb/2, cosine_vs_jtk$amplitude_bulk)
+# lines(c(0,100), c(0,100))
+# plot(cosine_vs_jtk$Max_Amp_var/2, abs(cosine_vs_jtk$double_freq_amplitude))
+# lines(c(0,100), c(0,100))
+}
+cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+
+cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi) & as.numeric(fund_mean_coeff)>0)
+table(cos_phis_tmm_filt$Source)
+
+
+# save(cos_phis_tmm, file = "./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression.RData")
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+
+liver_phi_boxplot = cos_phis_tmm_filt %>%
+  filter(Source %in% c("hepatocytes 1", "hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes"))%>%
+  ggplot( aes(x = Source,y =  phi*12/pi, fill = Source))+
+  geom_boxplot(outlier.shape = NA)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(alpha = 0.5,
+      position = position_jitter(width = jitter_width, seed = jitter_seed)
+   ) +
+  scale_fill_manual(values = custom_colors) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )
+
+
+ggsave("./figures/mouse_liver/norming_w_hepatocyte_cells/bootEJTKgenes_to_cosinorParams/ejtk_targeted2hrWindows/boxplot_ejtkList_to_regression_residualsVarSignal_varPthr05.pdf", plot = liver_phi_boxplot, device = "pdf", width = 7, height = 5)
+
+# save(cos_phis_tmm, file = "./figures/mouse_liver/norming_w_hepatocyte_cells/bootEJTKgenes_to_cosinorParams/ejtk_targeted2hrWindows/phis_ejtkList_to_regression_residualsVarSignal_varPthr05.RData")
+
+# 
+# # How do these phis compare to the 1hr targeted results?
+# load("./figures/mouse_liver/ejtk/ejtk_targeted1hrWindows/ejtkList_to_regression_residualsVarSignal_phis_varPthr05.RData")
+# hr1_phis = cos_phis_tmm
+# load("./figures/mouse_liver/ejtk/ejtk_targeted2hrWindows/residualRegressionForVar/ejtkList_to_regression_residualsVarSignal_phis_varPthr05.RData")
+# hr2_phis = cos_phis_tmm
+# 
+# hr1_phis$cell_gene = paste0(hr1_phis$Source, hr1_phis$Row.names)
+# hr2_phis$cell_gene = paste0(hr2_phis$Source, hr2_phis$Row.names)
+# 
+# x = list(hr1_targeted_list = hr1_phis$Row.names, hr2_targeted_list = hr2_phis$Row.names)
+# ggvenn::ggvenn(x)+ ggtitle("All genes (with Nan Phis)")
+# 
+# hr1_phis_filt = filter(hr1_phis, !is.na(phi))
+# hr2_phis_filt = filter(hr2_phis, !is.na(phi))
+# 
+# x = list(hr1_targeted_list = hr1_phis_filt$Row.names, hr2_targeted_list = hr2_phis_filt$Row.names)
+# ggvenn::ggvenn(x)+ ggtitle("Real Phi genes")
+```
+
+#### Repeat above but the 2hr targeted rhythms are found in variance that has been processed slightly differently (isolate the double frequency instead of y \~ m residuals)
+
+```{r}
+cell_types = c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes")
+
+filenames <- as.vector(outer(cell_types, paste0("_seed", 1:4), paste0))
+
+var_p_value = 0.05
+
+#Find the genes to test from Bootejtk. This will be the intersection of all folds:
+sig_ejtk_genes <- list()
+for(cell_type in filenames){
+  var_path = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/liver_targeted12rhythms_fixedAcroRegression_2hrWidth/bashLoop_", cell_type, "_targeted_results_FixedAcroRegression_2hr_width.txt")
+  SCN_var = read.delim(var_path)
+  pb_path = paste0("~/Documents/eJTK/BooteJTK/mouse_liver/hepa_only_normed/mouse_liver_pb/ejtk_pb_results/", cell_type, "_pb_Vash__boot10-rep2_GammaP.txt")
+  SCN_pb = read.delim(pb_path)
+  
+  merged_res = merge(SCN_var, SCN_pb, by.x = "Gene", by.y = "ID", suffixes = c("_var", "_pb")) %>% filter(Pvalue < var_p_value & GammaP < 0.05) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
+  merged_res$Source = cell_type
+  
+  sig_ejtk_genes[[cell_type]] = merged_res
+}
+sig_ejtk_genes_df <- bind_rows(sig_ejtk_genes) %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed")
+
+consensus_sig_ejtk_genes_df = sig_ejtk_genes_df %>%
+  group_by(cell, Gene) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+
+consensus_unique <- consensus_sig_ejtk_genes_df %>%
+  select(cell, Gene, n_seeds) %>%
+  distinct()
+
+table(consensus_unique$cell)
+
+
+load("mouse_liver_pb_var_counts_hepatocytes_only_list.RData")
+
+### Loop through pb and var and call ORPHEUS calc_phi ###
+cluster_phis = list()
+for(cell_type in c("periportal hepatocytes" , "hepatocytes 2" ,          "hepatocytes 1", "pericentral hepatocytes")){
+# cell_type_str = str_remove(cell_type, "/")
+message("Looking at celltype: ", cell_type)
+ejtk_sig_genes = consensus_unique %>% filter(cell == cell_type) %>% select(Gene) %>% unname %>% unlist
+  
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+stopifnot(all(ejtk_sig_genes %in% rownames(pb_mat)))
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "(\\d+)")
+ZT = as.numeric(matches[,2])
+# print(ZT)
+
+
+pb_cycling = is_cycling(ZT, pb_mat = pb_mat, time_units = "hrs")
+
+
+phase_pb = pb_cycling %>% select(Gene_Symbols, acrophase_bulk)
+var_mat = var_mat[phase_pb$Gene_Symbols,]
+pb_mat = pb_mat[phase_pb$Gene_Symbols,]
+stopifnot(all(rownames(pb_mat) == pb_cycling$Gene_Symbols))
+stopifnot(all(rownames(pb_mat) == rownames(var_mat)))
+phase_pb_num = phase_pb$acrophase_bulk %>% unname %>% unlist %>% as.numeric
+#hist(as.numeric(phase_pb))
+var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb_num)
+
+bulk_amp_thr = 0.5
+
+input_cos = var_cyclers %>%
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(p_statistic < 0.05) %>%
+    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= bulk_amp_thr) %>%
+    filter(Gene_Symbols %in% ejtk_sig_genes) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+ # Calculate phi parameters
+phi = input_cos %>%
+        apply(., 1, function(row) {
+            suppressWarnings(
+                 find_analytic(row[1], row[2], row[3], row[4])
+                 )
+        }) %>%
+        t %>%
+        as.data.frame
+
+colnames(phi) = c("G", "Ac", "theta", "phi")
+output = merge(phi, input_cos, by = 0)
+
+local_res =  list("tmm" = output)
+names(local_res) =cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+
+
+# cosine_vs_jtk = merge(vipgrp, input_cos, by.x = "Gene", by.y = 0)
+# plot(cosine_vs_jtk$PhaseMean, cosine_vs_jtk$acrophase_bulk*12/pi)
+# lines(c(0,100), c(0,100))
+# plot(cosine_vs_jtk$PhaseMean12, cosine_vs_jtk$acrophase_bulk)
+# lines(c(0,100), c(0,100))
+# plot(cosine_vs_jtk$Max_Amp_pb/2, cosine_vs_jtk$amplitude_bulk)
+# lines(c(0,100), c(0,100))
+# plot(cosine_vs_jtk$Max_Amp_var/2, abs(cosine_vs_jtk$double_freq_amplitude))
+# lines(c(0,100), c(0,100))
+}
+cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+
+cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi) & as.numeric(fund_mean_coeff) > 0)
+table(cos_phis_tmm_filt$Source)
+
+
+# save(cos_phis_tmm, file = "./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression.RData")
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+
+liver_phi_boxplot = cos_phis_tmm_filt %>%
+  filter(Source %in% c("hepatocytes 1", "hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes"))%>%
+  ggplot( aes(x = Source,y =  phi*12/pi, fill = Source))+
+  geom_boxplot(outlier.shape = NA)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(alpha = 0.5,
+      position = position_jitter(width = jitter_width, seed = jitter_seed)
+   ) +
+  scale_fill_manual(values = custom_colors) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )
+
+# ggsave("./figures/mouse_liver/norming_w_hepatocyte_cells/bootEJTKgenes_to_cosinorParams/ejtk_targeted2hrWindows/boxplot_ejtkList_to_regression_FixedRegressionVarSignal_varPthr05.pdf", plot = liver_phi_boxplot, device = "pdf", width = 7, height = 5)
+
+kruskal.test(phi ~ Source, data = cos_phis_tmm_filt)
+
+# save(cos_phis_tmm, file = "./figures/mouse_liver/norming_w_hepatocyte_cells/bootEJTKgenes_to_cosinorParams/ejtk_targeted2hrWindows/phis_ejtkList_to_regression_FixedRegressionVarSignal_varPthr05.RData")
+
+# How do these phis compare to the 2hr targeted results using "residuals" method?
+load("./figures/mouse_liver/norming_w_hepatocyte_cells/bootEJTKgenes_to_cosinorParams/ejtk_targeted2hrWindows/phis_ejtkList_to_regression_FixedRegressionVarSignal_varPthr05.RData")
+fixed_phis = cos_phis_tmm
+load("./figures/mouse_liver/norming_w_hepatocyte_cells/bootEJTKgenes_to_cosinorParams/ejtk_targeted2hrWindows/phis_ejtkList_to_regression_residualsVarSignal_varPthr05.RData")
+resid_phis = cos_phis_tmm
+
+fixed_phis$cell_gene = paste0(fixed_phis$Source, fixed_phis$Row.names)
+resid_phis$cell_gene = paste0(resid_phis$Source, resid_phis$Row.names)
+
+x = list(fixed_targeted_list = fixed_phis$Row.names, resid_targeted_list = resid_phis$Row.names)
+ggvenn::ggvenn(x)+ ggtitle("All genes (with Nan Phis)")
+
+fixed_phis_filt = filter(fixed_phis, !is.na(phi))
+resid_phis_filt = filter(resid_phis, !is.na(phi))
+
+x = list(fixed_targeted_list = fixed_phis_filt$Row.names, resid_targeted_list = resid_phis_filt$Row.names)
+ggvenn::ggvenn(x)+ ggtitle("Real Phi genes")
+```
+
+#### Compare liver phis to SCN phis
+
+```{r}
+load("./figures/mouse_liver/ejtk/ejtk_targeted2hrWindows/FixedRegressionForVar//ejtkList_to_regression_FixedRegressionVarSignal_phis_varPthr05.RData")
+fixed_phis = cos_phis_tmm
+kruskal.test(phi ~ Source, data = fixed_phis)
+
+load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_varPthr05.RData")
+SCN_phis = cos_phis_tmm
+SCN_phis_keep = filter(SCN_phis, Source %in% c("vipnms","cckc1ql3"))
+wilcox.test(phi~ Source, data = SCN_phis_keep)
+SCN_phis_keep$tissue = "SCN"
+fixed_phis$tissue = "liver"
+setequal(colnames(fixed_phis), colnames(SCN_phis_keep))
+mouse_combined_phis = rbind(SCN_phis_keep, fixed_phis)
+
+wilcox.test(phi ~ tissue, data =mouse_combined_phis)
+boxplot(phi ~ tissue, data = mouse_combined_phis)
+kruskal.test(phi ~ Source, data = mouse_combined_phis )
+pairwise.wilcox.test(mouse_combined_phis$phi, mouse_combined_phis$Source, p.adjust.method = "BH")
+mouse_combined_phis %>% group_by(Source) %>% summarize(med = median(phi, na.rm = T)*12/pi)
+#####################
+load("./figures/mouse_liver/ejtk/ejtk_targeted2hrWindows/residualRegressionForVar/ejtkList_to_regression_residualsVarSignal_phis_varPthr05.RData")
+fixed_phis = cos_phis_tmm
+kruskal.test(phi ~ Source, data = fixed_phis)
+
+load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_2hrWidth_RonResidualsMethod_varPthr05.RData")
+SCN_phis = cos_phis_tmm
+SCN_phis_keep = filter(SCN_phis, Source %in% c("vipnms","cckc1ql3"))
+wilcox.test(phi~ Source, data = SCN_phis_keep)
+SCN_phis_keep$tissue = "SCN"
+fixed_phis$tissue = "liver"
+setequal(colnames(fixed_phis), colnames(SCN_phis_keep))
+mouse_combined_phis = rbind(SCN_phis_keep, fixed_phis)
+
+wilcox.test(phi ~ tissue, data =mouse_combined_phis)
+boxplot(phi ~ tissue, data = mouse_combined_phis)
+
+kruskal.test(phi ~ Source, data = mouse_combined_phis )
+pairwise.wilcox.test(mouse_combined_phis$phi, mouse_combined_phis$Source, p.adjust.method = "BH")
+mouse_combined_phis %>% group_by(Source) %>% summarize(med = median(phi, na.rm = T)*12/pi)
+```
+
+##### Cell Receptor plots
+
+```{r}
+s_obj =  seurat_obj
+
+#I will take raw counts from seurat, pseudobulk them by cell type and individual, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva:
+summed_cts = AggregateExpression(s_obj,
+                           assays = "RNA", 
+                           layers = "counts", 
+                           group.by = c("seurat_clusters", "orig.ident"))
+summed_cts = summed_cts$RNA
+
+y <- DGEList(counts = summed_cts)
+keep <- filterByExpr(y)
+y <- y[keep, , keep.lib.sizes = FALSE]
+y <- calcNormFactors(y, method = "TMM")
+# Get log-transformed Counts Per Million (logCPM)
+logcpm_pseudobulk <- cpm(y, log = T)
+
+
+#Now, I only need a single, average expression value for each cell type, so I will take the average of the logcpm values above for each cell type:
+celltypes <- sub("_.*", "", colnames(logcpm_pseudobulk))
+
+celltype_avg_logcpm <- sapply(split(seq_along(celltypes), celltypes), function(idx) {
+  rowMeans(logcpm_pseudobulk[, idx, drop = FALSE])
+}) %>% as.data.frame
+
+scn_receptors <- c("Nr3c1", "Adrb2", "Adrb3", "Mtnr1a", "Mtnr1b")
+feeding_receptors <- c("Insr", "Igf1r","Gcgr")
+nutrient_sensors <- c("Mtor", "Rps6kb1", "Eif4ebp1", "Prkaa1", "Prkaa2")
+
+# Combine them into a single list for convenience
+genes_to_test <- c(scn_receptors, feeding_receptors, nutrient_sensors)
+
+
+# Reshape the data from "wide" to "long" for ggplot
+avg_expression_long <- celltype_avg_logcpm %>%
+  rownames_to_column("gene") %>%  # Convert gene names from rownames to a column
+  pivot_longer(
+    cols = -gene,        # Pivot all columns except for the gene column
+    names_to = "cell_type",     # The new column for the cell type names
+    values_to = "avg_expression" # The new column for the expression values
+  )
+
+load("../examples_fixed_acrophase/figures/phis_2pr_4folds_seed_avg_fixed_acro.RData")
+
+
+median_phi_by_cell <- phis_seed_avg %>%
+  group_by(cell) %>%
+  summarise(median_phi = median(phi*12/pi, na.rm = TRUE))
+
+plot_df = left_join(avg_expression_long, median_phi_by_cell, by = join_by(cell_type == cell)) %>% filter(cell_type %in% c("hepatocytes 1","hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes") & gene %in% c( "Gcgr", "Insr", "Nr3c1"))
+
+plot_df$gene <- factor(plot_df$gene, levels = c("Nr3c1", "Insr", "Gcgr"))
+
+library(ggpubr)
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+
+faceted_correlation_plot <- ggplot(plot_df, aes(x = avg_expression, y = median_phi)) +
+  # Add the points for each cell type
+  geom_point(aes(color = cell_type), size = 4, alpha = 0.8) + 
+  scale_color_manual(values = custom_colors) +
+  # Add a linear regression line to visualize the trend in each facet
+  geom_smooth(method = "lm", se = FALSE, color = "firebrick", linetype = "dashed", linewidth = 1) +
+  # Add non-overlapping labels for each point using the 'cell_type' column
+  # This is the key to knowing which point is which cell type.
+  ggrepel::geom_text_repel(aes(label = cell_type),color = "black", box.padding = 0.1, max.overlaps = Inf, seed = 123) +
+  # Add the Spearman correlation coefficient and p-value to each facet
+  # Spearman is robust for small N (N=4).
+  stat_cor(method = "spearman",  size = 4, label.x.npc = "middle", label.y.npc = 0.8) +
+  # Create a separate plot for each gene
+  facet_wrap(~ gene, scales = "free_x", nrow = 4) +
+  # --- Aesthetics and Labels ---
+  labs(
+    title = "Relationship Between Receptor Expression and Cellular Synchrony",
+    subtitle = "Each point represents a cell type (N=4). Spearman corr.",
+    x = "Average gene expression (avg log cpm)",
+    y = "Median phase dispersion (hrs)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+guides(color = "none")     # remove fill legend
+
+ggsave("~/Desktop/mouse_liver_receptor_v_phi.pdf",plot = faceted_correlation_plot, device = "pdf", width = 9, height = 4)
+
+```
+
+##### Stratify cell type by receptor expression:
+
+```{r}
+# library(GSVA)
+# library(msigdbr)
+# library(edgeR)
+# s_obj =  seurat_obj
+# 
+# #I will take raw counts from seurat, pseudobulk them by cell type and individual, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva:
+# summed_cts = AggregateExpression(s_obj,
+#                            assays = "RNA", 
+#                            layers = "counts", 
+#                            group.by = c("seurat_clusters", "orig.ident"))
+# summed_cts = summed_cts$RNA
+# 
+# y <- DGEList(counts = summed_cts)
+# keep <- filterByExpr(y)
+# y <- y[keep, , keep.lib.sizes = FALSE]
+# y <- calcNormFactors(y, method = "TMM")
+# # Get log-transformed Counts Per Million (logCPM)
+# logcpm_pseudobulk <- cpm(y, log = T)
+# 
+# 
+# #Now, I only need a single, average expression value for each cell type, so I will take the average of the logcpm values above for each cell type:
+# celltypes <- sub("_.*", "", colnames(logcpm_pseudobulk))
+# 
+# celltype_avg_logcpm <- sapply(split(seq_along(celltypes), celltypes), function(idx) {
+#   rowMeans(logcpm_pseudobulk[, idx, drop = FALSE])
+# })
+# 
+# 
+# #Get libraries
+# # mouse_reactome <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2", subcollection = "CP:REACTOME")
+# # genesets_list <- split(mouse_reactome$gene_symbol, mouse_reactome$gs_name)
+# 
+# # mouse_hallmark <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "MH")
+# # genesets_list <- split(mouse_hallmark$gene_symbol, mouse_hallmark$gs_name)
+# 
+# mouse_BP <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M5", subcollection = "GO:BP")
+# genesets_list <- split(mouse_BP$gene_symbol, mouse_BP$gs_name)
+# 
+# 
+# gsva_res = gsva(celltype_avg_logcpm, genesets_list) %>% as.data.frame
+# 
+# load("../examples_fixed_acrophase/figures/phis_2pr_4folds_seed_avg_fixed_acro.RData")
+# 
+# 
+# median_phi_by_cell <- phis_seed_avg %>%
+#   group_by(cell) %>%
+#   summarise(median_phi = median(phi*12/pi, na.rm = TRUE))%>%
+#   rename(cell_type = cell) # Rename for joining
+# 
+# # Convert gsva results to long format and join
+# gsva_long <- gsva_res %>%
+#   rownames_to_column("pathway") %>%
+#   pivot_longer(cols = -pathway, names_to = "cell_type", values_to = "gsva_score")
+# 
+# # Join the two data frames
+# combined_data <- left_join(gsva_long, median_phi_by_cell, by = "cell_type") %>% filter(cell_type %in% c("hepatocytes 1","hepatocytes 2", "pericentral hepatocytes", "periportal hepatocytes", "cholangiocytes"))
+# 
+# # Calculate the final, reliable correlations
+# correlation_results <- combined_data %>%
+#   group_by(pathway) %>%
+#   summarise(
+#     correlation = cor(gsva_score, median_phi, method = "spearman", use = "complete.obs"),
+#     correlation_pearson  = cor(gsva_score, median_phi, method = "pearson",  use = "complete.obs"),
+# 
+#     .groups = 'drop'
+#   )
+# 
+# # Check your top hits now
+# print(arrange(correlation_results, correlation)) # Most negative
+# print(arrange(correlation_results, desc(correlation))) # Most positive
+# 
+# # write.table(correlation_results, "~/Desktop/gsva_REACTOME_score_vs_phis.csv", sep = ",", row.names = F)
+# # write.table(correlation_results, "~/Desktop/gsva_HALLMARK_score_vs_phis.csv", sep = ",", row.names = F)
+# write.table(correlation_results, "~/Desktop/gsva_GOBP_score_vs_phis.csv", sep = ",", row.names = F)
+```
+
+##### Plot pathway results of interest
+
+```{r}
+# 
+# library(ggpubr)
+# custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+# 
+# 
+# pos_pathways = correlation_results %>%
+#   filter((correlation)>= 1)
+# pos_pathway_corr = filter(combined_data, pathway %in% pos_pathways$pathway)
+# 
+# 
+# pos_pathway_correlation_plot <- ggplot(pos_pathway_corr, aes(x = gsva_score, y = median_phi)) +
+#   # Add the points for each cell type
+#   geom_point(aes(color = cell_type), size = 4, alpha = 0.8) + 
+#   scale_color_manual(values = custom_colors) +
+#   # Add a linear regression line to visualize the trend in each facet
+#   geom_smooth(method = "lm", se = FALSE, color = "firebrick", linetype = "dashed", linewidth = 1) +
+#   # Add non-overlapping labels for each point using the 'cell_type' column
+#   # This is the key to knowing which point is which cell type.
+#   ggrepel::geom_text_repel(aes(label = cell_type),color = "black", box.padding = 0.1, max.overlaps = Inf, seed = 123) +
+#   # Add the Spearman correlation coefficient and p-value to each facet
+#   # Spearman is robust for small N (N=4).
+#   stat_cor(method = "spearman",  size = 4, label.x.npc = "middle", label.y.npc = 0.8) +
+#   # Create a separate plot for each gene
+#   facet_wrap(~ pathway, scales = "free_x", nrow = 4, labeller = labeller(pathway = function(x) str_wrap(str_replace_all(x, "_", " "), 20)))  +
+#   # --- Aesthetics and Labels ---
+#   labs(
+#     title = "Relationship Between Pathway GSVA score and Cellular Synchrony",
+#     subtitle = "Each point represents a cell type (N=4)",
+#     x = "GSVA score",
+#     y = "Median phase dispersion (hrs)"
+#   ) +
+#   theme_bw() +
+#   theme(
+#     strip.background = element_blank(),
+#     strip.text = element_text(color = "black", size = 12),
+#     axis.text.x = element_text(size = 14),    # Increase x-axis text size
+#     axis.text.y = element_text(size = 14),    # Increase y-axis text size
+#     axis.title.x = element_text(size = 16),   # Increase x-axis title size
+#     axis.title.y = element_text(size = 16),   # Increase y-axis title size
+#     legend.title = element_text(size = 12)    # Increase legend title size
+#   )+guides(color = "none")     # remove fill legend
+# 
+# 
+# 
+# 
+# neg_pathways = correlation_results %>%
+#   filter(correlation <= -.9)
+# neg_pathway_corr = filter(combined_data, pathway %in% neg_pathways$pathway)
+# #Some of these don't have a great Pearson correaltion I will remove those:
+# neg_pathway_corr = filter(neg_pathway_corr, !(pathway %in% c("HALLMARK_G2M_CHECKPOINT", "HALLMARK_PI3K_AKT_MTOR_SIGNALING")))
+# 
+# neg_pathway_correlation_plot <- ggplot(neg_pathway_corr, aes(x = gsva_score, y = median_phi)) +
+#   # Add the points for each cell type
+#   geom_point(aes(color = cell_type), size = 4, alpha = 0.8) + 
+#   scale_color_manual(values = custom_colors) +
+#   # Add a linear regression line to visualize the trend in each facet
+#   geom_smooth(method = "lm", se = FALSE, color = "firebrick", linetype = "dashed", linewidth = 1) +
+#   # Add non-overlapping labels for each point using the 'cell_type' column
+#   # This is the key to knowing which point is which cell type.
+#   ggrepel::geom_text_repel(aes(label = cell_type),color = "black", box.padding = 0.1, max.overlaps = Inf, seed = 123) +
+#   # Add the Spearman correlation coefficient and p-value to each facet
+#   # Spearman is robust for small N (N=4).
+#   stat_cor(method = "spearman",  size = 4, label.x.npc = "middle", label.y.npc = 0.8) +
+#   # Create a separate plot for each gene
+#   facet_wrap(~ pathway, scales = "free_x", nrow = 4, labeller = labeller(pathway = function(x) str_wrap(str_replace_all(x, "_", " "), 20)))  +
+#   # --- Aesthetics and Labels ---
+#   labs(
+#     title = "Relationship Between Pathway GSVA score and Cellular Synchrony",
+#     subtitle = "Each point represents a cell type (N=4)",
+#     x = "GSVA score",
+#     y = "Median phase dispersion (hrs)"
+#   ) +
+#   theme_bw() +
+#   theme(
+#     strip.background = element_blank(),
+#     strip.text = element_text(color = "black", size = 12),
+#     axis.text.x = element_text(size = 14),    # Increase x-axis text size
+#     axis.text.y = element_text(size = 14),    # Increase y-axis text size
+#     axis.title.x = element_text(size = 16),   # Increase x-axis title size
+#     axis.title.y = element_text(size = 16),   # Increase y-axis title size
+#     legend.title = element_text(size = 12)    # Increase legend title size
+#   )+guides(color = "none")     # remove fill legend
+# 
+# 
+# 
+# ggsave("~/Desktop/mouse_liver_pos_pathway_v_phi.pdf",plot = pos_pathway_correlation_plot, device = "pdf", width = 9, height = 4)
+# ggsave("~/Desktop/mouse_liver_neg_pathway_v_phi.pdf",plot = neg_pathway_correlation_plot, device = "pdf", width = 9, height = 8)
+```
+
+##### SCN vs Feeding pathway related plots
+
+```{r}
+# reactome_corr = read_csv("../../figures/mouse_liver/gsva_REACTOME_score_vs_phis.csv")
+# hallmark_corr = read_csv("../../figures/mouse_liver/gsva_HALLMARK_score_vs_phis.csv")
+# GOBP_corr = read_csv("../../figures/mouse_liver/gsva_GOBP_score_vs_phis.csv")
+# 
+# all_correlation_res = rbind(reactome_corr, hallmark_corr, GOBP_corr)
+# 
+# central_entrainment = c("GOBP_RESPONSE_TO_GLUCOCORTICOID", "GOBP_ADRENERGIC_RECEPTOR_SIGNALING_PATHWAY", "GOBP_CAMP_MEDIATED_SIGNALING", "HALLMARK_P53_PATHWAY", "REACTOME_PKA_MEDIATED_PHOSPHORYLATION_OF_CREB", "GOBP_CELLULAR_RESPONSE_TO_DEXAMETHASONE_STIMULUS", "GOBP_CELLULAR_RESPONSE_TO_DEXAMETHASONE_STIMULUS")
+# 
+# peripheral_entrainment = c("HALLMARK_PI3K_AKT_MTOR_SIGNALING", "HALLMARK_MTORC1_SIGNALING", "GOBP_INSULIN_RECEPTOR_SIGNALING_PATHWAY", "HALLMARK_ADIPOGENESIS", "HALLMARK_FATTY_ACID_METABOLISM", "REACTOME_VLDL_ASSEMBLY", "HALLMARK_OXIDATIVE_PHOSPHORYLATION", "REACTOME_GLUCONEOGENESIS", "GOBP_PROTEIN_KINASE_A_SIGNALING", "GOBP_RESPONSE_TO_GLUCAGON", "GOBP_CELLULAR_RESPONSE_TO_GLUCAGON_STIMULUS", "GOBP_CELLULAR_RESPONSE_TO_GLUCOSE_STARVATION", "GOBP_INSULIN_RECEPTOR_SIGNALING_PATHWAY", "GOBP_CELLULAR_RESPONSE_TO_INSULIN_STIMULUS")
+# 
+# 
+# # Combine the lists of interest
+# pathways_of_interest <- c(central_entrainment, peripheral_entrainment)
+# 
+# # Filter the main results, add group labels, and clean up names
+# plot_data <- all_correlation_res %>%
+#   filter(pathway %in% pathways_of_interest) %>%
+#   mutate(
+#     # Create a new column to label each pathway's group
+#     entrainment_type = case_when(
+#       pathway %in% central_entrainment  ~ "Central (SCN-Driven)",
+#       pathway %in% peripheral_entrainment ~ "Peripheral (Feeding/Fasting)"
+#     ),
+#     # Clean up long pathway names for better plotting
+#     pathway_clean = str_replace(pathway, "HALLMARK_", "") %>%
+#                     str_replace("GOBP_", "") %>%
+#                     str_replace("REACTOME_", "") %>%
+#                     str_replace_all("_", " ") %>%
+#                     str_to_title()
+#   )
+# 
+# comparison_plot <- ggplot(
+#   plot_data, 
+#   aes(
+#     # Reorder the pathways based on their correlation value for a clean, sorted look
+#     x = reorder(pathway_clean, correlation), 
+#     y = correlation, 
+#     fill = entrainment_type
+#   )
+# ) +
+#   geom_col(color = "black", width = 0.7) +
+#   geom_hline(yintercept = 0, color = "grey30") +
+#   coord_flip() +
+#   scale_fill_manual(
+#     values = c("Central (SCN-Driven)" = "#0072B2", "Peripheral (Feeding/Fasting)" = "#D55E00"),
+#     name = "Entrainment Signal Type" 
+#   ) +
+#   labs(
+#     title = "Central SCN Signals are the Strongest Predictors of Cellular Synchrony",
+#     subtitle = "Negative correlation indicates that high pathway activity is associated with high synchrony (low dispersion)",
+#     x = NULL,
+#     y = "Spearman Correlation with Phase Asynchrony"
+#   ) +
+#   theme_bw(base_size = 14) +
+#   theme(
+#     plot.title = element_text(face = "bold"),
+#     axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+#     axis.text.y = element_text(size = 14),    # Increase y-axis text size
+#     axis.title.x = element_text(size = 16),   # Increase x-axis title size
+#     axis.title.y = element_text(size = 16),   # Increase y-axis title size
+#     legend.title = element_text(size = 12),   # Increase legend title size
+#   )+
+#   scale_y_continuous(limits = c(-1,1))
+# print(comparison_plot)
+# 
+# 
+# #####PLOT 2 ##########
+# plot_data2 = filter(all_correlation_res, stringr::str_starts(pathway, "HALLMARK") & abs(correlation) >= 0.8) %>% mutate(
+#     # Clean up long pathway names for better plotting
+#     pathway_clean = str_replace(pathway, "HALLMARK_", "") %>%
+#                     str_replace("GOBP_", "") %>%
+#                     str_replace("REACTOME_", "") %>%
+#                     str_replace_all("_", " ") %>%
+#                     str_to_title()
+#   )
+# 
+# comparison_plot2 <- ggplot(
+#   plot_data2, 
+#   aes(
+#     # Reorder the pathways based on their correlation value for a clean, sorted look
+#     x = reorder(pathway_clean, correlation), 
+#     y = correlation  )
+# ) +
+#   geom_col(color = "black", width = 0.7) +
+#   geom_hline(yintercept = 0, color = "grey30") +
+#   coord_flip() +
+#   labs(
+#     x = NULL,
+#     y = "Spearman Correlation with Phase Asynchrony"
+#   ) +
+#   theme_bw(base_size = 14) +
+#   theme(
+#     plot.title = element_text(face = "bold"),
+#     axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+#     axis.text.y = element_text(size = 14),    # Increase y-axis text size
+#     axis.title.x = element_text(size = 16),   # Increase x-axis title size
+#     axis.title.y = element_text(size = 16),   # Increase y-axis title size
+#     legend.title = element_text(size = 12),   # Increase legend title size
+#   )+
+#   scale_y_continuous(limits = c(-1,1))
+# print(comparison_plot2)
+```
+
+### Hepatocytes together (and causal pathway analysis)
+
+Given that the phi estimates across hepatocytes are not significantly different, it doesn't make sense to look at correlations between cell type phis and cell type GSVA pathway scores. Here we do something similar to the AD data: Combine all hepatocytes together. Remove genes that are rhythmic. Run GSVA to get a pathway score for each subject. Stratify the subjects based on pathway score, run ORPHEUS for each pathway and see which pathways have significant differences in phi.
+
+```{r}
+#Read in combined counts, normalize with edgeR, compute the logcpm (which we will give to gsva). Run once, then read in for speed (that is why it is commented out).
+
+library(GSVA)
+library(msigdbr)
+library(edgeR)
+library(SeuratDisk)
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(circular)
+
+s_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object_hepa_only_ORPHEUS_norm.Rds")
+
+#First we will identify cycling genes in the hepatocyte population with pseudoreplicates:
+
+s_obj$heps = "hepatocyte"
+
+#Create Pseudobulk:
+seeds <- c(1,2,3,4)
+#Initialize an empty list to store all results
+hepatocyte_pb_var <- list()
+for(i in seeds){
+  message(paste("--- Running ORPHEUS with seed:", i, "---"))
+    
+    # returns a list like: list('CellTypeA' = ..., 'CellTypeB' = ...)
+    results_one_seed <- calculate_orpheus_inputs(
+      s_obj, 
+      groups_to_analyze = "hepatocyte", 
+      grouping_var = "heps", 
+      num_replicates = 2, 
+      random_seed = i
+    )
+    
+    # Modify the names to include the seed identifier
+    # prevents name clashes when we combine the lists.
+    original_names <- names(results_one_seed)
+    new_names <- paste0(original_names, "_seed", i)
+    names(results_one_seed) <- new_names
+    
+    # Append the newly named results to main list
+    hepatocyte_pb_var <- c(hepatocyte_pb_var, results_one_seed)
+}
+# Check the names of the final combined list
+print("Names of the final combined list:")
+print(names(hepatocyte_pb_var))
+# save(hepatocyte_pb_var, file = "~/Desktop/mouse_liver_4_seeds_pb_var_counts_hepatocytes_combined_list.RData")
+#######Load results from above #######
+load("./figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_w_pseudoReps/mouse_liver_4_seeds_pb_var_counts_hepatocytes_combined_list.RData")
+
+
+#for each pseudobulk and var (4 total), find pb and var rhythms
+cluster_cyc_results = list()
+pb_cyc_res = list()
+for(cell_type in names(hepatocyte_pb_var)){
+  
+print(paste("Analyzing", cell_type))
+
+tmp = hepatocyte_pb_var[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+if(length(unique(diff(ZT))[unique(diff(ZT)) != 0]) != 1 || length(unique(ZT)) < 6){
+  print("Cell does not have time points suitable for analysis")
+  next
+}
+
+#Call cosinor regression methods, where phases of variance wave are NOT fixed:
+pb_cycling = is_cycling(ZT, pb_mat, time_units = "hrs")
+
+all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
+phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
+
+var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb, time_units = "hrs")
+
+input_cos = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+local_res =  list("tmm" = input_cos)
+names(local_res) = cell_type
+cluster_cyc_results <- append(cluster_cyc_results, list(local_res))
+
+local_res2 = list(pb_cycling)
+names(local_res2) =cell_type
+pb_cyc_res <- append(pb_cyc_res, list(local_res2))
+}
+
+cluster_cyc_df <- do.call(rbind, lapply(seq_along(cluster_cyc_results), function(source_name) {
+  current_df <- cluster_cyc_results[[source_name]][[1]]
+  current_df$Source <- names(cluster_cyc_results[[source_name]][1])
+  current_df
+}))
+
+
+cluster_cyc_df_filt = filter(cluster_cyc_df, fund_mean_coeff >=0)
+table(cluster_cyc_df_filt$Source)
+
+cell_seed_df <- cluster_cyc_df_filt %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed")
+
+genes_consensus = cell_seed_df %>%
+  group_by(cell, Gene_Symbols) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+
+hepa_combined_phi_estimates_2PR = genes_consensus
+# save(hepa_combined_phi_estimates_2PR, file = "~/Desktop/hepa_combined_phi_estimates_2PseudoReps.RData")
+
+gene_list <- genes_consensus %>%
+ group_by(cell) %>%
+ summarise(genes = list(unique(Gene_Symbols)), .groups = "drop") %>%
+ deframe()
+
+hepatocyte_combined_genes_to_test = gene_list[["hepatocyte"]]
+# save(hepatocyte_combined_genes_to_test, file = "figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepatocyte_combined_genes_to_calc_phi_on.RData")
+
+hepa_cyclers <- do.call(rbind, lapply(seq_along(pb_cyc_res), function(source_name) {
+  current_df <- pb_cyc_res[[source_name]][[1]]
+  current_df$Source <- names(pb_cyc_res[[source_name]][1])
+  current_df
+})) 
+hepa_cyclers_filt = filter(hepa_cyclers, as.numeric(p_statistic) < 0.05)
+
+hepa_cyclers_consensus  = hepa_cyclers_filt %>% 
+  separate(Source, into = c("cell", "seed"), sep = "_seed")%>%
+  group_by(cell, Gene_Symbols) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)%>%
+ group_by(cell) %>%
+ summarise(genes = list(unique(Gene_Symbols)), .groups = "drop") %>%
+ deframe()
+
+hepa_cyclers_consensus = hepa_cyclers_consensus[["hepatocyte"]]
+# save(hepa_cyclers_consensus, file = "figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepatocyte_genes_cycling_all_4_folds_hepatocyte_combined.RData")
+
+```
+
+I can also do this without pseudoreplicates in the combined hepatocytes, fewer hepa_cyclers_consensus, but more pathways will be used in GSVA:
+
+```{r}
+#Read in combined counts, normalize with edgeR, compute the logcpm (which we will give to gsva). Run once, then read in for speed (that is why it is commented out).
+
+library(GSVA)
+library(msigdbr)
+library(edgeR)
+library(SeuratDisk)
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(circular)
+
+s_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object_hepa_only_ORPHEUS_norm.Rds")
+
+#First we will identify cycling genes in the hepatocyte population with pseudoreplicates:
+
+s_obj$heps = "hepatocyte"
+
+hepatocyte_pb_var <- calculate_orpheus_inputs(
+      s_obj, 
+      groups_to_analyze = "hepatocyte", 
+      grouping_var = "heps"
+    )
+
+
+#for each pseudobulk and var (4 total), find pb and var rhythms
+cluster_cyc_results = list()
+pb_cyc_res = list()
+for(cell_type in names(hepatocyte_pb_var)){
+  
+print(paste("Analyzing", cell_type))
+
+tmp = hepatocyte_pb_var[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+if(length(unique(diff(ZT))[unique(diff(ZT)) != 0]) != 1 || length(unique(ZT)) < 6){
+  print("Cell does not have time points suitable for analysis")
+  next
+}
+
+#Call cosinor regression methods, where phases of variance wave are NOT fixed:
+pb_cycling = is_cycling(ZT, pb_mat, time_units = "hrs")
+
+all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
+phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
+
+var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb, time_units = "hrs")
+
+input_cos = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+local_res =  list("tmm" = input_cos)
+names(local_res) = cell_type
+cluster_cyc_results <- append(cluster_cyc_results, list(local_res))
+
+local_res2 = list(pb_cycling)
+names(local_res2) =cell_type
+pb_cyc_res <- append(pb_cyc_res, list(local_res2))
+}
+
+cluster_cyc_df <- do.call(rbind, lapply(seq_along(cluster_cyc_results), function(source_name) {
+  current_df <- cluster_cyc_results[[source_name]][[1]]
+  current_df$Source <- names(cluster_cyc_results[[source_name]][1])
+  current_df
+}))
+
+
+cluster_cyc_df_filt = filter(cluster_cyc_df, fund_mean_coeff >=0)
+table(cluster_cyc_df_filt$Source)
+hepatocyte_combined_genes_to_test = cluster_cyc_df_filt$Gene_Symbols %>% unname %>% unlist
+# save(hepatocyte_combined_genes_to_test, file = "figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_NO_pseudoReps/hepatocyte_combined_genes_to_calc_phi_on.RData")
+
+hepa_cyclers <- do.call(rbind, lapply(seq_along(pb_cyc_res), function(source_name) {
+  current_df <- pb_cyc_res[[source_name]][[1]]
+  current_df$Source <- names(pb_cyc_res[[source_name]][1])
+  current_df
+})) 
+hepa_cyclers_filt = filter(hepa_cyclers, as.numeric(p_statistic) < 0.05)
+
+hepa_cyclers_combined = hepa_cyclers_filt$Gene_Symbols %>% unname %>% unlist
+
+# save(hepa_cyclers_combined, file = "figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_NO_pseudoReps/hepatocyte_genes_cycling_combined.RData")
+
+```
+
+```{r}
+
+counts = s_obj@assays$ORPHEUS_norm$counts
+# Get log-transformed Counts
+log_counts = log1p(counts)
+# save(log_counts, file ="./figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_NO_pseudoReps/hepatocytes_log_counts_for_gsva.RData")
+
+
+```
+
+```{r}
+load("./figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_NO_pseudoReps/hepatocytes_log_counts_for_gsva.RData")
+```
+
+```{r}
+# mouse_hallmark <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "MH")
+# genesets_list <- split(mouse_hallmark$gene_symbol, mouse_hallmark$gs_name)
+
+# mouse_wiki <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2", subcollection = "CP:WIKIPATHWAYS")
+# genesets_list <- split(mouse_wiki$gene_symbol, mouse_wiki$gs_name)
+
+#Custom pathways:
+genesets_list = list("SCN_entrainment" = c("Nr3c1", "Tsc22d3", "Cirbp", "Hsf1", "Adrb2"), "Feeding_entrainment" = c("Insr", "Igf1r", "Slc2a2", "Gck", "Srebf1", "Pdk4"))
+```
+
+#### Get Non-cycling genes in hepatocytes (identified above)
+
+```{r}
+load("figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_NO_pseudoReps/hepatocyte_genes_cycling_combined.RData")
+
+hepa_non_cyclers = setdiff(rownames(s_obj), hepa_cyclers_combined)
+stopifnot(setequal(rownames(s_obj), c(hepa_non_cyclers, hepa_cyclers_combined)))
+
+# hepa_non_cyclers = setdiff(rownames(s_obj), hepa_cyclers_consensus)
+# stopifnot(setequal(rownames(s_obj), c(hepa_non_cyclers, hepa_cyclers_consensus)))
+
+#OLDER CODE where cycling genes were not taken from any pseudoreplicate process
+# hep_pb = hep_pb_var$`1`$pseudobulk_tmm_matrix
+# hep_var = hep_pb_var$`1`$var_df
+# times = str_extract(colnames(hep_pb), "[0-9]+") %>% as.numeric
+# 
+# hepa_cycling_results = is_cycling(times, pb_mat = hep_pb, time_units = "hrs")
+# all(hepa_cycling_results$Gene_Symbols == rownames(hep_var))
+# hepa_pb_phases = hepa_cycling_results$acrophase_bulk %>% as.numeric()
+# 
+# hepa_variance_cyc_results = var_cycling_fix_acro(times = times, var_mat = hep_var, mean_mat = hep_pb, phase_pb = hepa_pb_phases, time_units = "hrs")
+# 
+# 
+# write.table(hepa_cycling_results, "~/Desktop/hepatocytes_all_cycling_genes_pb.csv", sep = ",", row.names = F)
+# write.table(hepa_variance_cyc_results, "~/Desktop/hepatocytes_all_cycling_genes_var.csv", sep = ",", row.names = F)
+# 
+# 
+# hepa_cycling_results = read.csv("figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepatocytes_all_cycling_genes_pb.csv")
+# hepa_non_cyclers  = dplyr::filter(hepa_cycling_results, as.numeric(p_statistic) > 0.05)
+```
+
+#### Call GSVA to score cells, pseudobulk them by stratified score
+
+here I scores cells with GSVA, then stratify them into quartiles or tertiles.
+
+```{r}
+#convert logged PB counts to a df
+df_log_counts = as.data.frame(log_counts)
+
+#select the non-rhythmic genes
+tmm_non_rhythmic = df_log_counts[hepa_non_cyclers,]
+  
+tmm_non_rhythmic_matrix = as.matrix(tmm_non_rhythmic)
+
+#Call GSVA, ranking CTL subjects by pathway score for all pathways
+# gsva_res_mat = gsva(tmm_non_rhythmic_matrix, genesets_list, min.sz = 30)
+gsva_res_mat = gsva(tmm_non_rhythmic_matrix, genesets_list, min.sz = 1)
+
+# save(gsva_res_mat, file = "~/Desktop/mouse_liver_hepatocytes_gsva_cell_hallmark.RData")
+##########################
+# LOAD cell GSVA results #
+load("figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/mouse_liver_hepatocytes_gsva_cell_hallmark_minSize30.RData")
+###########################
+gsva_res = gsva_res_mat %>% as.data.frame
+
+##QUARTILES
+# pathway_groups <- t(apply(gsva_res, 1, function(scores) {
+#   qs <- quantile(scores, probs = c(0, .25, .5, .75, 1), na.rm = TRUE)
+#   cut(scores, breaks = qs, include.lowest = TRUE,
+#       labels = c("Q1_low", "Q2_midlow", "Q3_midhigh", "Q4_high"))
+# }))
+#TERTILES
+pathway_groups <- t(apply(gsva_res, 1, function(scores) {
+    bins <- ntile(scores, 3)
+  factor(
+    bins,
+    levels = 1:3,
+    labels = c("T1_low", "T2_mid", "T3_high")
+  )
+}))
+# pathway_groups <- t(apply(gsva_res, 1, function(scores) {
+#     bins <- ntile(scores, 2)
+#   factor(
+#     bins,
+#     levels = 1:2,
+#     labels = c("low", "high")
+#   )
+# }))
+
+dimnames(pathway_groups) <- list(rownames(gsva_res), colnames(gsva_res))
+
+stopifnot(all(colnames(pathway_groups) == colnames(s_obj)))
+#---------------------------------------------------------------------------
+#Loop through all the pathways and create pb and variance matrices for each,
+#We will store these so I only have to do it once.
+
+pb_var_list = list()
+for(i in 1:nrow(pathway_groups)){
+
+pathway_name = rownames(pathway_groups)[i]
+message("Analyzing ", pathway_name)
+
+
+score <- gsva_res[i, ] %>% unname %>% unlist
+
+# Check depth dependence
+cor1 = cor(score, s_obj$nCount_RNA,   use = "complete.obs")
+cor2 = cor(score, s_obj$nFeature_RNA, use = "complete.obs")
+print(cor1)
+print(cor2)
+
+cell_strat = pathway_groups[i, ]
+stopifnot(all(colnames(pathway_groups) == colnames(s_obj)))
+
+cell_times = str_extract(s_obj$orig.ident, "[0-9]+$") %>% as.numeric
+
+### rhythmicity of pathway scores
+cell_times_rad = cell_times * pi/12
+
+mean_score_by_t <- tibble(s = score, t = cell_times_rad) %>%
+  group_by(t) %>%
+  summarise(mean_s = mean(s), .groups = "drop")
+
+partial_model = lm(mean_s ~ 1, data = mean_score_by_t)
+full_model = lm(mean_s ~ sin(t) + cos(t), data = mean_score_by_t)
+anova_results = anova(partial_model, full_model)
+if(anova_results$`Pr(>F)`[2] < 0.05){
+   message(pathway_name , " nested cosinor F test < 0.05, skipping.")
+   next # Skips the rest of the current iteration
+}
+
+###
+# times_split = split(cell_times, cell_strat)
+# test <- list(low = circular(times_split$low,
+#                  units="hours"),
+#   high = circular(times_split$high,
+#                      units="hours")
+# )
+# ww_test_res = circular::watson.wheeler.test(test)
+# if(ww_test_res$p.value < 0.05){
+#    message(pathway_name , " ww_test < 0.05, skipping.")
+#    next # Skips the rest of the current iteration
+# }
+
+# tab <- table(cell_strat, cell_times)
+
+# If some expected counts are small (likely), use simulated p-value:
+# chisq <- chisq.test(tab)
+
+# Cramer's V
+# V <- sqrt(chisq$statistic / (sum(tab) * (min(nrow(tab), ncol(tab)) - 1)))
+# print(V)
+
+# Add the new metadata to the Seurat object
+all(colnames(s_obj) == names(cell_strat))
+s_obj$strat <- cell_strat
+table(s_obj$strat, s_obj$orig.ident, useNA = "ifany")
+
+##TERTILES
+orpheus_input_i = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("T1_low", "T2_mid", "T3_high"), grouping_var = "strat", assay_to_use = "ORPHEUS_norm")
+#QUARTILES
+# orpheus_input_i = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("Q1_low", "Q2_midlow","Q3_midhigh", "Q4_high"), grouping_var = "strat", assay_to_use = "ORPHEUS_norm")
+
+orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+input_i =  list("tmm" = orpheus_input_sans_counts)
+names(input_i) = pathway_name
+pb_var_list <- append(pb_var_list, input_i)
+
+}
+
+# save(pb_var_list, file ="figures/mouse_liver/pathway_analysis/hepatocytes_pb_var_matrices_list.RData")
+load("figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_NO_pseudoReps/hepatocytes_pb_var_matrices_list.RData")
+
+```
+
+#### Repeat above but stratify cells by GSVA score WITHIN subject/timepoint
+
+```{r}
+
+load("figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_w_pseudoReps/mouse_liver_hepatocytes_gsva_cell_hallmark_minSize30.RData")
+###########################
+gsva_res = gsva_res_mat %>% as.data.frame
+
+stopifnot(all(colnames(s_obj) == colnames(gsva_res)))
+subject = s_obj$orig.ident
+
+pathway_groups_df <- as.data.frame(t(gsva_res)) %>%
+  rownames_to_column("cell") %>%
+  mutate(subject = subject[cell]) %>%
+  pivot_longer(
+    -c(cell, subject),
+    names_to = "pathway",
+    values_to = "score"
+  ) %>%
+  group_by(subject, pathway) %>%
+  # mutate(
+  #   tertile = ntile(score, 3),
+  #   tertile = factor(
+  #     tertile,
+  #     levels = 1:3,
+  #     labels = c("T1_low", "T2_mid", "T3_high")
+  #   )
+  # ) %>%
+  mutate(
+  quartile = ntile(score, 4),
+  quartile = factor(
+    quartile,
+    levels = 1:4,
+    labels = c("Q1_low", "Q2_midlow", "Q3_midhigh", "Q4_high")
+  )
+)%>%
+  ungroup()
+
+# pathway_groups <- pathway_groups_df %>%
+#   select(cell, pathway, tertile) %>%
+#   pivot_wider(
+#     names_from = cell,
+#     values_from = tertile
+#   ) %>%
+#   column_to_rownames("pathway") %>%
+#   as.matrix()
+pathway_groups <- pathway_groups_df %>%
+  select(cell, pathway, quartile) %>%
+  pivot_wider(
+    names_from = cell,
+    values_from = quartile
+  ) %>%
+  column_to_rownames("pathway") %>%
+  as.matrix()
+
+#Check that for a pathway, each timepoint is split in three:
+pathway_groups_df %>%
+     filter(pathway == "HALLMARK_ADIPOGENESIS") %>%
+     count(subject, quartile)
+
+stopifnot(all(colnames(pathway_groups) == colnames(s_obj)))
+
+# #TESTING THAT MY STRATIFICATION CODE WORKS::
+# gsva_res <- matrix(c(
+#     # Pathway1 scores (12 cells)
+#     1, 2, 3, 4,5, 6,  10, 11, 12, 13,14, 15,
+#     # Pathway2 scores (12 cells)
+#     8, 7, 6, 5,3,2,  20, 19, 18, 17, 16, 15,
+#     # Pathway3 (12 cells)
+#     1, 3, 2, 4, 5, 6,  18, 20, 23, 21, 22, 19
+#   ),
+#   nrow = 3,
+#   byrow = TRUE
+# )
+# 
+# rownames(gsva_res) <- c("Pathway1", "Pathway2", "Pathway3")
+# colnames(gsva_res) <- paste0("Cell", 1:12)
+# subject <- c(
+#   "SubjA", "SubjA", "SubjA", "SubjA", "SubjA", "SubjA",
+#   "SubjB", "SubjB", "SubjB", "SubjB", "SubjB", "SubjB"
+# )
+# names(subject) <- colnames(gsva_res)
+# 
+# pathway_groups_df <- as.data.frame(t(gsva_res)) %>%
+#   rownames_to_column("cell") %>%
+#   mutate(subject = subject[cell]) %>%
+#   pivot_longer(
+#     -c(cell, subject),
+#     names_to = "pathway",
+#     values_to = "score"
+#   ) %>%
+#   group_by(subject, pathway) %>%
+#   mutate(
+#     tertile = ntile(score, 3),
+#     tertile = factor(
+#       tertile,
+#       levels = 1:3,
+#       labels = c("T1_low", "T2_mid", "T3_high")
+#     )
+#   ) %>%
+#   ungroup()
+# 
+# pathway_groups <- pathway_groups_df %>%
+#   select(cell, pathway, tertile) %>%
+#   pivot_wider(
+#     names_from = cell,
+#     values_from = tertile
+#   ) %>%
+#   column_to_rownames("pathway") %>%
+#   as.matrix()
+
+#---------------------------------------------------------------------------
+#Loop through all the pathways and create pb and variance matrices for each,
+#We will store these so I only have to do it once.
+
+pb_var_list = list()
+for(i in 1:nrow(pathway_groups)){
+
+pathway_name = rownames(pathway_groups)[i]
+message("Analyzing ", pathway_name)
+
+
+score <- gsva_res[i, ] %>% unname %>% unlist
+
+# Check depth dependence
+cor1 = cor(score, s_obj$nCount_RNA)
+cor2 = cor(score, s_obj$nFeature_RNA)
+print(cor1)
+print(cor2)
+
+cell_strat = pathway_groups[i, ]
+stopifnot(all(colnames(pathway_groups) == colnames(s_obj)))
+
+cell_times = str_extract(s_obj$orig.ident, "[0-9]+$") %>% as.numeric
+
+### rhythmicity of pathway scores
+cell_times_rad = cell_times * pi/12
+
+mean_score_by_t <- tibble(s = score, t = cell_times_rad) %>%
+  group_by(t) %>%
+  summarise(mean_s = mean(s), .groups = "drop")
+
+partial_model = lm(mean_s ~ 1, data = mean_score_by_t)
+full_model = lm(mean_s ~ sin(t) + cos(t), data = mean_score_by_t)
+anova_results = anova(partial_model, full_model)
+if(anova_results$`Pr(>F)`[2] < 0.05){
+   message(pathway_name , " nested cosinor F test < 0.05, skipping.")
+   next # Skips the rest of the current iteration
+}
+
+###
+# times_split = split(cell_times, cell_strat)
+# test <- list(low = circular(times_split$low,
+#                  units="hours"),
+#   high = circular(times_split$high,
+#                      units="hours")
+# )
+# ww_test_res = circular::watson.wheeler.test(test)
+# if(ww_test_res$p.value < 0.05){
+#    message(pathway_name , " ww_test < 0.05, skipping.")
+#    next # Skips the rest of the current iteration
+# }
+
+# tab <- table(cell_strat, cell_times)
+
+# If some expected counts are small (likely), use simulated p-value:
+# chisq <- chisq.test(tab)
+
+# Cramer's V
+# V <- sqrt(chisq$statistic / (sum(tab) * (min(nrow(tab), ncol(tab)) - 1)))
+# print(V)
+
+# Add the new metadata to the Seurat object
+all(colnames(s_obj) == names(cell_strat))
+s_obj$strat <- cell_strat
+table(s_obj$strat, s_obj$orig.ident, useNA = "ifany")
+
+##TERTILES
+# orpheus_input_i = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("T1_low", "T2_mid", "T3_high"), grouping_var = "strat", assay_to_use = "ORPHEUS_norm")
+#QUARTILES
+orpheus_input_i = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("Q1_low", "Q2_midlow","Q3_midhigh", "Q4_high"), grouping_var = "strat", assay_to_use = "ORPHEUS_norm")
+
+orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+input_i =  list("tmm" = orpheus_input_sans_counts)
+names(input_i) = pathway_name
+pb_var_list <- append(pb_var_list, input_i)
+
+}
+
+# save(pb_var_list, file ="figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_w_pseudoReps_stratCellsByGSVAwithinTimepoint/hepatocytes_pb_var_matrices_list_tertiles_within_timepoint.RData")
+save(pb_var_list, file ="figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_w_pseudoReps_stratCellsByGSVAwithinTimepoint/hepatocytes_pb_var_matrices_list_quartiles_within_timepoint.RData")
+```
+
+#### Calc phi in combined hepatocyte pseudobulk and variance for in each pathway:
+
+```{r}
+#Now read in the genes we will calc phis in:
+load("figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_w_pseudoReps/hepatocyte_combined_genes_to_calc_phi_on.RData")
+
+# load("figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_NO_pseudoReps/hepatocyte_combined_genes_to_calc_phi_on.RData")
+
+keep_genes = hepatocyte_combined_genes_to_test
+#Now for each pathway, we look at the high, mid, and low groups:
+phi_outputs = list()
+stat_tests = list()
+for(pathway_name in names(pb_var_list)){
+
+orpheus_input_i = pb_var_list[[pathway_name]]
+
+cluster_phis = list()
+for(cell_type in names(orpheus_input_i)){
+print(paste("Analyzing condition", cell_type))
+tmp = orpheus_input_i[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+times = colnames(pb_mat) %>% str_extract(., "[0-9]+$") %>% as.numeric
+
+
+pb_mat_keep = pb_mat[keep_genes, ]
+var_mat_keep = var_mat[keep_genes, ]
+
+stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+
+pb_cycling_group = is_cycling(times, pb_mat_keep, time_units = "hrs")
+# write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+
+stopifnot(all.equal(pb_cycling_group$Gene_Symbols , rownames(var_mat_keep)))
+pb_phases_group = as.numeric(pb_cycling_group$acrophase_bulk)
+
+var_cyclers_group = var_cycling_fix_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_group, time_units = "hrs")
+
+
+input_cos_group = var_cyclers_group %>%
+    left_join(pb_cycling_group, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(Gene_Symbols %in% keep_genes) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    # column_to_rownames("Gene_Symbols")%>%
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_group = input_cos_group %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_group) = c("G", "Ac", "theta", "phi")
+
+output_group = merge(phi_group, input_cos_group, by = 0)
+
+local_res =  list("tmm" = output_group)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+#Combine 'low' and 'high' groups
+phi_results_i <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+#----- plotting ------
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+# color_palette <- c("T1_low" = "#66c5cc", "T2_mid" = "#F6CF71", "T3_high" = "#f89c74")
+color_palette <- c("Q1_low" = "#66c5cc", "Q2_midlow" = "#F6CF71", "Q3_midhigh" = "#f89c74", "Q4_high" = "#7f58af" )
+
+k_test = kruskal.test(phi~Source, data = phi_results_i)
+pairwise_w_test = pairwise.wilcox.test(phi_results_i$phi, phi_results_i$Source, p.adjust.method = "BH")
+
+# my_comparisons <- list(
+#   c("T1_low", "T2_mid"),
+#   c("T1_low", "T3_high"),
+#   c("T2_mid", "T3_high")
+# )
+
+# Create the plot
+p <- ggplot(phi_results_i, aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi),
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(method = "kruskal.test") +
+  # stat_compare_means(
+  #   comparisons = my_comparisons,
+  #   method = "wilcox.test",
+  #   p.adjust.method = "BH"
+  # )+
+  # Add labels and a title
+  labs(
+    title = pathway_name,
+    y = "Phase Dispersion (hrs)",
+    x = "Pathway stratification"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  ylim(c(0,8))
+#print(p)
+ggsave(paste0("~/Desktop/mouse_liver_hepatocytes_pathways/phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
+
+phi_output_i =  list("tmm" = phi_results_i)
+names(phi_output_i) = pathway_name
+phi_outputs <- append(phi_outputs, phi_output_i)
+
+tests = list( list("kruskal" = k_test, "pairwise.wilcox" = pairwise_w_test))
+names(tests) = pathway_name
+stat_tests <- append(stat_tests, tests)
+}
+
+all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
+
+
+save(phi_outputs, file = "~/Desktop/mouse_liver_hepatocytes_pathways/mouse_liver_hepatocytes_pathway_phis.RData")
+save(all_pathway_phis_df, file = "~/Desktop/mouse_liver_hepatocytes_pathways/mouse_liver_hepatocytes_pathway_phis_df.RData")
+
+kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
+kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
+save(kruskal.df, file = "~/Desktop/mouse_liver_hepatocytes_pathways/kruskal_df.RData")
+save(stat_tests, file = "~/Desktop/mouse_liver_hepatocytes_pathways_test.RData")
+```
+
+```{r}
+#OLD CODE where for each pathway, I would first find cycling/var_cycling in a "combined" pseudobulk and variance that was all timespoints for high, mid, low (18 times for example)
+
+# #Now for each pathway, we look at the high, mid, and low groups:
+# phi_outputs = list()
+# stat_tests = list()
+# for(pathway_name in names(pb_var_list)){
+# 
+# orpheus_input_i = pb_var_list[[pathway_name]]
+# #---------------BEGIN new technique: cycling together--------------------  
+# # run cycling on the high, mid, and low groups together (concatenated pseudobulk, etc.) to find which genes I will test by my normal cutoffs, then do Orpheus for those genes without any cutoffs.
+# ##TERTILES
+# pb_combined  <- cbind(orpheus_input_i$T1_low$pseudobulk_tmm_matrix, orpheus_input_i$T2_mid$pseudobulk_tmm_matrix, orpheus_input_i$T3_high$pseudobulk_tmm_matrix)
+# var_combined <- cbind(orpheus_input_i$T1_low$var_df,
+#                       orpheus_input_i$T2_mid$var_df,
+#                       orpheus_input_i$T3_high$var_df)
+# 
+# ##QUARTILES
+# # pb_combined  <- cbind(orpheus_input_i$Q1_low$pseudobulk_tmm_matrix, orpheus_input_i$Q2_midlow$pseudobulk_tmm_matrix, orpheus_input_i$Q3_midhigh$pseudobulk_tmm_matrix,
+# # orpheus_input_i$Q4_high$pseudobulk_tmm_matrix)
+# # var_combined <- cbind(orpheus_input_i$Q1_low$var_df,
+# #                       orpheus_input_i$Q2_midlow$var_df,
+# #                       orpheus_input_i$Q3_midhigh$var_df,
+# #                       orpheus_input_i$Q4_high$var_df)
+# 
+# 
+# times_combined = colnames(pb_combined) %>% str_extract(., "[0-9]+$") %>% as.numeric
+# 
+# 
+# pb_cycling = is_cycling(times_combined, pb_combined, time_units = "hrs")
+# 
+# pb_cycling_filt = filter(pb_cycling, as.numeric(p_statistic) < 0.05)
+# 
+# pb_phases = as.numeric(unname(unlist(pb_cycling_filt$acrophase_bulk)))
+# 
+# #Subset the pseudobulk and variance matrices so I can save time not running var_cycling on non-cycling genes.
+# pb_combined_subset = pb_combined[pb_cycling_filt$Gene_Symbols,]
+# var_combined_subset = var_combined[pb_cycling_filt$Gene_Symbols,]
+# stopifnot(all.equal(rownames(pb_combined_subset), rownames(var_combined_subset)))
+# 
+# var_cyclers = var_cycling_fix_acro(times = times_combined, 
+#     var_mat = var_combined_subset,
+#     mean_mat = pb_combined_subset,    
+#     phase_pb =  pb_phases,
+#     time_units = "hrs")
+# 
+# 
+# #Which genes should I extract a phi from?
+# bulk_thr_cutoff = 0.5  
+# 
+# keep_genes = var_cyclers %>% 
+#     left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var","_pb")) %>%
+#     mutate(across(-Gene_Symbols, as.numeric)) %>%
+#     filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+#     filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+#     filter(partial_model_AIC_var > full_model_AIC_var) %>%
+#     select(Gene_Symbols) %>%
+#     unname %>%
+#     unlist
+# 
+# #---------------END new technique: cycling together--------------------  
+# cluster_phis = list()
+# for(cell_type in names(orpheus_input_i)){
+# print(paste("Analyzing condition", cell_type))
+# tmp = orpheus_input_i[[cell_type]]
+# pb_mat = tmp[[1]]
+# var_mat = tmp[[2]]
+# times = colnames(pb_mat) %>% str_extract(., "[0-9]+$") %>% as.numeric
+# 
+# 
+# pb_mat_keep = pb_mat[keep_genes, ]
+# var_mat_keep = var_mat[keep_genes, ]
+# 
+# stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+# 
+# pb_cycling_group = is_cycling(times, pb_mat_keep, time_units = "hrs")
+# # write.table(pb_cycling_custom, paste0("~/Desktop/pb_cycling_results_",cell_type, ".csv" ), sep = ",", row.names = F)
+# 
+# stopifnot(all.equal(pb_cycling_group$Gene_Symbols , rownames(var_mat_keep)))
+# pb_phases_group = as.numeric(pb_cycling_group$acrophase_bulk)
+# 
+# var_cyclers_group = var_cycling_fix_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_group, time_units = "hrs")
+# 
+# 
+# input_cos_group = var_cyclers_group %>%
+#     left_join(pb_cycling_group, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+#     mutate(across(-Gene_Symbols, as.numeric)) %>%
+#     # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+#     # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+#     dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+#     filter(Gene_Symbols %in% keep_genes) %>%
+#     column_to_rownames("Gene_Symbols")
+#     # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+#     # column_to_rownames("Gene_Symbols")%>%
+#     # filter(partial_model_AIC_var > full_model_AIC_var)
+# 
+# # Calculate phi parameters
+# phi_group = input_cos_group %>%
+#     apply(., 1, function(row) {
+#         suppressWarnings(
+#              Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+#              )
+#     }) %>%
+#     t %>%
+#     as.data.frame
+# colnames(phi_group) = c("G", "Ac", "theta", "phi")
+# 
+# output_group = merge(phi_group, input_cos_group, by = 0)
+# 
+# local_res =  list("tmm" = output_group)
+# names(local_res) = cell_type
+# cluster_phis <- append(cluster_phis, list(local_res))
+# }
+# 
+# #Combine 'low' and 'high' groups
+# phi_results_i <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+#   current_df <- cluster_phis[[source_name]][[1]]
+#   current_df$Source <- names(cluster_phis[[source_name]][1])
+#   current_df
+# }))
+# 
+# #----- plotting ------
+# jitter_width <- 0.15
+# jitter_seed <- 123 # A specific seed for reproducibility
+# color_palette <- c("T1_low" = "#66c5cc", "T2_mid" = "#F6CF71", "T3_high" = "#f89c74")
+# # color_palette <- c("Q1_low" = "#66c5cc", "Q2_midlow" = "#F6CF71", "Q3_midhigh" = "#f89c74", "Q4_high" = "#7f58af" )
+# 
+# k_test = kruskal.test(phi~Source, data = phi_results_i)
+# pairwise_w_test = pairwise.wilcox.test(phi_results_i$phi, phi_results_i$Source, p.adjust.method = "BH")
+# 
+# # my_comparisons <- list(
+# #   c("T1_low", "T2_mid"),
+# #   c("T1_low", "T3_high"),
+# #   c("T2_mid", "T3_high")
+# # )
+# 
+# # Create the plot
+# p <- ggplot(phi_results_i, aes(x = Source, y = phi*12/pi, fill = Source)) +
+#   geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+#   geom_jitter(
+#   aes(x = Source, y = phi*12/pi), 
+#   alpha = 0.4,
+#   position = position_jitter(width = jitter_width, seed = jitter_seed)
+#   ) +
+#   # Manually set the colors for fill and color aesthetics
+#   scale_fill_manual(values = color_palette) +
+#   scale_color_manual(values = color_palette) +
+#   #Significance bar
+#   stat_compare_means(method = "kruskal.test") +
+#   # stat_compare_means(
+#   #   comparisons = my_comparisons,
+#   #   method = "wilcox.test",
+#   #   p.adjust.method = "BH"
+#   # )+
+#   # Add labels and a title
+#   labs(
+#     title = pathway_name,
+#     y = "Phase Dispersion (hrs)",
+#     x = "Pathway stratification"
+#   ) +
+#   theme_bw(base_size = 14) +
+#   theme(
+#     legend.position = "none", # The x-axis labels are sufficient
+#     plot.title = element_text(face = "bold"),
+#     axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+#     axis.text.y = element_text(size = 14),    # Increase y-axis text size
+#     axis.title.x = element_text(size = 16),   # Increase x-axis title size
+#     axis.title.y = element_text(size = 16),   # Increase y-axis title size
+#     legend.title = element_text(size = 12),   # Increase legend title size
+#   )+
+#   ylim(c(0,8))
+# #print(p)
+# ggsave(paste0("~/Desktop/mouse_liver_hepatocytes_pathways/phi_boxplot",pathway_name,".pdf"),p, device = "pdf", width = 5, height = 5 )
+# 
+# phi_output_i =  list("tmm" = phi_results_i)
+# names(phi_output_i) = pathway_name
+# phi_outputs <- append(phi_outputs, phi_output_i)
+# 
+# tests = list( list("kruskal" = k_test, "pairwise.wilcox" = pairwise_w_test))
+# names(tests) = pathway_name
+# stat_tests <- append(stat_tests, tests)
+# }
+# 
+# all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
+# 
+# 
+# save(phi_outputs, file = "~/Desktop/mouse_liver_hepatocytes_pathways/mouse_liver_hepatocytes_pathway_phis.RData")
+# save(all_pathway_phis_df, file = "~/Desktop/mouse_liver_hepatocytes_pathways/mouse_liver_hepatocytes_pathway_phis_df.RData")
+# 
+# kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
+# kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
+# save(kruskal.df, file = "~/Desktop/mouse_liver_hepatocytes_pathways/kruskal_df.RData")
+# save(stat_tests, file = "~/Desktop/mouse_liver_hepatocytes_pathways_test.RData")
+```
+
+liver zonation vs pathway scores:
+
+```{r}
+all(colnames(pathway_groups) == colnames(s_obj))
+# score_bins = pathway_groups["HALLMARK_PEROXISOME",]
+score_bins = pathway_groups["HALLMARK_FATTY_ACID_METABOLISM",]
+subtypes = s_obj$all_cell_types
+table(score_bins, subtypes)
+
+
+
+df = data.frame(cell = subtypes, perox = unname(unlist(gsva_res["HALLMARK_PEROXISOME",])), FAM =unname(unlist(gsva_res["HALLMARK_FATTY_ACID_METABOLISM",] )))
+```
+
+#### Pathway analysis within subset of hepatocytes:
+
+```{r}
+
+library(GSVA)
+library(msigdbr)
+library(edgeR)
+library(SeuratDisk)
+library(Seurat)
+library(tidyverse)
+library(ggpubr)
+library(circular)
+
+seurat_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object.Rds")
+
+s_obj = subset(seurat_obj, subset = all_cell_types %in% "periportal hepatocytes")
+
+#I will take raw counts from seurat, then tmm normalize with edgeR to logcpm, then provide those numebrs to gsva:
+s_obj = prepare_seurat_for_orpheus(seurat_obj = s_obj, assay = "RNA")
+
+s_obj$dummy = "1"
+#I will also make a pseudobulk for the 4 hepatocyte types, in which I will identify rhythms and remove those genes from GSVA:
+hep_pb_var = calculate_orpheus_inputs(s_obj, groups_to_analyze = "1", grouping_var = "dummy")
+
+
+counts = s_obj@assays$ORPHEUS_norm$counts
+# Get log-transformed Counts
+log_counts = log1p(counts)
+```
+
+### Calc phi of hepatocytes combined
+
+```{r}
+
+load("figures/mouse_liver/norming_w_hepatocyte_cells/pathway_analysis/hepa_rhythms_w_pseudoReps/hepatocyte_combined_genes_to_calc_phi_on.RData")
+
+keep_genes = hepatocyte_combined_genes_to_test
+
+orpheus_input_all_hepas = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("hepatocyte"), grouping_var = "heps", assay_to_use = "ORPHEUS_norm")
+
+tmp = orpheus_input_all_hepas[["hepatocyte"]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+times = colnames(pb_mat) %>% str_extract(., "[0-9]+$") %>% as.numeric
+
+
+pb_mat_keep = pb_mat[keep_genes, ]
+var_mat_keep = var_mat[keep_genes, ]
+
+stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+
+pb_cycling_group = is_cycling(times, pb_mat_keep, time_units = "hrs")
+
+stopifnot(all.equal(pb_cycling_group$Gene_Symbols , rownames(var_mat_keep)))
+pb_phases_group = as.numeric(pb_cycling_group$acrophase_bulk)
+
+var_cyclers_group = var_cycling_fix_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_group, time_units = "hrs")
+
+
+input_cos_group = var_cyclers_group %>%
+    left_join(pb_cycling_group, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(Gene_Symbols %in% keep_genes) %>%
+    column_to_rownames("Gene_Symbols")
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    # column_to_rownames("Gene_Symbols")%>%
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_group = input_cos_group %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_group) = c("G", "Ac", "theta", "phi")
+
+hepa_combined_phi_df = merge(phi_group, input_cos_group, by = 0)
+# save(hepa_combined_phi_df, file = "figures/mouse_liver/norming_w_hepatocyte_cells/phis_for_hepatocytes_combined/hepa_combined_phi_estimates_unfilt.RData")
+
+hepa_combined_phi_df_filt = filter(hepa_combined_phi_df, !is.na(phi) & as.numeric(fund_mean_coeff) > 0)
+# save(hepa_combined_phi_df_filt, file = "figures/mouse_liver/norming_w_hepatocyte_cells/phis_for_hepatocytes_combined/hepa_combined_phi_estimates_filt.RData")
+
+```
+
+### Pathway analysis within hepatocytes combined (not causal)
+
+```{r}
+
+load("figures/mouse_liver/norming_w_hepatocyte_cells/phis_for_hepatocytes_combined/hepa_combined_phi_estimates_filt.RData")
+
+library(enrichR)
+dbs <- c("MSigDB_Hallmark_2020", "KEGG_2019_Mouse", "KEGG_2021_Human", "WikiPathways_2024_Mouse", "Reactome_Pathways_2024")
+
+run_enrichR = function(phi_df, dbs, prop = 0.5){
+  websiteLive <- getOption("enrichR.live")
+  
+  top_frac = arrange(phi_df, phi) %>% slice_head(prop = prop) %>% select(Row.names) %>% unname %>% unlist
+  
+  bottom_frac = arrange(phi_df, phi) %>% slice_tail(prop = prop) %>% select(Row.names) %>% unname %>% unlist
+  
+  background = phi_df %>% select(Row.names) %>% unname %>% unlist
+  
+  if (websiteLive) {
+      # Replace 'Rank' with 'Overlap' column, calculated with GMT files
+      synchronized<- enrichr(top_frac, dbs, background = background, include_overlap = TRUE)
+      synchronized_df = do.call(rbind, synchronized) %>% arrange(P.value)
+      synchronized_df$group = "synch"
+      unsynch <-enrichr(bottom_frac, dbs, background = background, include_overlap = TRUE)
+      unsynch_df = do.call(rbind, unsynch) %>% arrange(P.value)
+      unsynch_df$group = "unsynch"
+
+     return(rbind(synchronized_df, unsynch_df))
+  }
+  
+}
+
+pathway_results = run_enrichR(hepa_combined_phi_df_filt, dbs = dbs, prop = 0.5)
+```
+
+### Compare these phis to mouse SCN
+
+```{r}
+load("figures/mouse_liver/norming_w_hepatocyte_cells/phis_for_hepatocytes_combined/hepa_combined_phi_estimates_filt.RData")
+
+liver_phis = hepa_combined_phi_df_filt
+
+load("./figures/mouse_SCN/COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regression_2hrWidth_RonResidualsMethod_varPthr05.RData")
+
+SCN_phis = cos_phis_tmm
+SCN_phis_keep = filter(SCN_phis, Source %in% c("vipnms","cckc1ql3"))
+wilcox.test(phi~ Source, data = SCN_phis_keep)
+SCN_phis_keep$tissue = "SCN"
+liver_phis$tissue = "liver"
+liver_phis$Source = "liver"
+setequal(colnames(liver_phis), colnames(SCN_phis_keep))
+mouse_combined_phis = rbind(SCN_phis_keep, liver_phis)
+
+wilcox.test(phi ~ tissue, data =mouse_combined_phis)
+boxplot(phi ~ tissue, data = mouse_combined_phis)
+
+kruskal.test(phi ~ Source, data = mouse_combined_phis )
+pairwise.wilcox.test(mouse_combined_phis$phi, mouse_combined_phis$Source, p.adjust.method = "BH")
+mouse_combined_phis %>% group_by(Source) %>% summarize(med = median(phi, na.rm = T)*12/pi)
+```
+
+### OLD CODE BELOW
+
+### Orpheus on just the 4 hepatocytes?
+
+```{r}
+s_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object.Rds")
+
+s_obj = subset(s_obj, subset = all_cell_types %in% c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes"))
+
+s_obj = prepare_seurat_for_orpheus(seurat_obj = s_obj, assay = "RNA")
+s_obj$hepa = "1"
+
+seeds <- c(1,2,3,4)
+#Initialize an empty list to store all results
+all_results_combined <- list()
+for(i in seeds){
+  message(paste("--- Running ORPHEUS with seed:", i, "---"))
+    
+    # returns a list like: list('CellTypeA' = ..., 'CellTypeB' = ...)
+    results_one_seed <- calculate_orpheus_inputs(
+      s_obj, 
+      groups_to_analyze = "1", 
+      grouping_var = "hepa", 
+      num_replicates = 2, 
+      random_seed = i
+    )
+    
+    # Modify the names to include the seed identifier
+    # prevents name clashes when we combine the lists.
+    original_names <- names(results_one_seed)
+    new_names <- paste0(original_names, "_seed", i)
+    names(results_one_seed) <- new_names
+    
+    # Append the newly named results to main list
+    all_results_combined <- c(all_results_combined, results_one_seed)
+}
+# Check the names of the final combined list
+print("Names of the final combined list:")
+print(names(all_results_combined))
+# save(all_results_combined, file = "mouse_liver_4_seeds_pb_var_counts_list.RData")
+#######Load results from above #######
+load("figures/mouse_liver/mouse_liver_4_seeds_pb_var_counts_list.RData")
+
+cluster_phis = list()
+for(cell_type in names(all_results_combined)){
+  
+print(paste("Analyzing", cell_type))
+
+
+# tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T)
+tmp = all_results_combined[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Variance of NB is var = mean + mean^2*theta
+#rearrange to solve for theta = (var-mean)/mean^2
+time_wise_theta_meas <- as.data.frame(mapply(function(v,m){(v-m)/m^2}, var_mat, pb_mat))
+rownames(time_wise_theta_meas) = rownames(pb_mat)
+colnames(time_wise_theta_meas) = paste0(colnames(time_wise_theta_meas), "_theta_meas")
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
+
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+if(length(unique(diff(ZT))[unique(diff(ZT)) != 0]) != 1 || length(unique(ZT)) < 6){
+  print("Cell does not have time points suitable for analysis")
+  next
+}
+
+#Call cosinor regression methods, where phases of variance wave are NOT fixed:
+pb_cycling = is_cycling(ZT, pb_mat)
+
+all(rownames(pb_mat) == pb_cycling$Gene_Symbols)
+phase_pb = pb_cycling %>% select(acrophase_bulk) %>% unname %>% unlist %>% as.numeric
+
+#hist(as.numeric(phase_pb))
+
+var_cyclers = var_cycling_fix_acro(times = ZT, var_mat = var_mat, mean_mat = pb_mat, phase_pb = phase_pb)
+
+input_cos = var_cyclers %>% 
+    left_join(pb_cycling, by = "Gene_Symbols", suffix=c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    filter(p_statistic < 0.05) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk, everything()) %>%
+    filter(amplitude_bulk >= 0.5) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    filter(partial_model_AIC_var > full_model_AIC_var)
+
+
+phi = calc_phi(pb_cycling, var_cyclers, cycling_p_thr = 0.05, bulk_amp_thr = 0.5)
+
+output_cos_tmm = merge(phi, input_cos, by = 0)
+output = merge(output_cos_tmm, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
+output = merge(output, agg_theta_meas, by.x = "Row.names", by.y = 0)
+
+
+local_res =  list("tmm" = output)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+cos_phis_tmm <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+save(cos_phis_tmm, file = "~/Desktop/hepatocytesCombined_phis_2pr_4folds_unfilt_fixed_acro.RData")
+
+```
+
+### Fold Averaging Seeds
+
+```{r}
+cos_phis_tmm_filt = filter(cos_phis_tmm, !is.nan(phi) & fund_mean_coeff >= 0)
+table(cos_phis_tmm_filt$Source)
+
+phis_filt <- cos_phis_tmm_filt %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed")
+
+phis_consensus = phis_filt %>%
+  group_by(cell, Row.names) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+
+#Now phis_consensus has repeat genes for each "seed"
+#gene count by cell type:
+phis_consensus %>% group_by(cell) %>% summarize(n_genes = n_distinct(Row.names))
+
+pval_cols = c("p_statistic", "double_freq_p_statistic")
+phis_seed_avg <- phis_consensus %>%
+  select(!contains("acrophase") & !contains("AIC") & !contains("BIC")) %>%
+  group_by(cell, Row.names) %>%
+  summarise(
+    across(all_of(pval_cols), max, na.rm = TRUE),
+    across(where(is.numeric) & !all_of(pval_cols), \(x) mean(x, na.rm = T)),
+    cell = first(cell),
+    .groups = "drop"
+  )
+
+save(phis_seed_avg, file = "~/Desktop/hepatocytes_phis_2pr_4folds_seed_avg_fixed_acro.RData")
+```
+
+### enrichR
+
+```{r}
+load("figures/mouse_liver/hepatocytes_phis_2pr_4folds_seed_avg_fixed_acro.RData")
+library(enrichR)
+websiteLive <- getOption("enrichR.live")
+
+dbs <- c("MSigDB_Hallmark_2020", "GO_Biological_Process_2023", "KEGG_2019_Mouse", "Reactome_2022", "KEGG_2021_Human")
+
+
+top_frac = arrange(phis_seed_avg, phi) %>% slice_head(prop = 0.5) %>% select(Row.names) %>% unname %>% unlist
+
+bottom_frac = arrange(phis_seed_avg, phi) %>% slice_tail(prop = 0.5) %>% select(Row.names) %>% unname %>% unlist
+
+background = phis_seed_avg %>% select(Row.names) %>% unname %>% unlist
+
+  if (websiteLive) {
+      # Replace 'Rank' with 'Overlap' column, calculated with GMT files
+      synchronized<- enrichr(top_frac, dbs, background = background, include_overlap = TRUE)
+      synchronized_df = do.call(rbind, synchronized) %>% arrange(P.value)
+      synchronized_df$group = "synch"
+      unsynch <-enrichr(bottom_frac, dbs, background = background, include_overlap = TRUE)
+      unsynch_df = do.call(rbind, unsynch) %>% arrange(P.value)
+      unsynch_df$group = "unsynch"
+
+     pathway_results = rbind(synchronized_df, unsynch_df)
+  }
+
+
+
+```
+
+### Write out RNKS
+
+```{r}
+hepa1_rnk = filter(phis_seed_avg, cell == "hepatocytes 1") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(hepa1_rnk, file = "~/Desktop/Mouse_liver_hepa1.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa2_rnk = filter(phis_seed_avg, cell == "hepatocytes 2") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(hepa2_rnk, file = "~/Desktop/Mouse_liver_hepa2.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+pc_rnk = filter(phis_seed_avg, cell == "pericentral hepatocytes") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(pc_rnk, file = "~/Desktop/Mouse_liver_pc.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+pp_rnk = filter(phis_seed_avg, cell == "periportal hepatocytes") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+write.table(pp_rnk, file = "~/Desktop/Mouse_liver_pp.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa2_rnk = filter(phis_seed_avg, cell == "hepatocytes 2") %>% mutate(metric = phi) %>% select(c(Row.names, metric)) %>% arrange(metric)
+
+hepa1MinusPeriportal_rnk = data.frame(Gene_Symbols = hepa1_portal_test_df$Row.names,
+                     metric = hepa1_portal_test_df$`phi_hepatocytes 1` - hepa1_portal_test_df$`phi_periportal hepatocytes`) %>% drop_na() %>% arrange(metric)
+
+write.table(hepa1MinusPeriportal_rnk, file = "~/Desktop/Mouse_liver_hepa1MinusPeriportal.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+
+hepa1MinusPericentral_rnk = data.frame(Gene_Symbols = hepa1_central_test_df$Row.names,
+                     metric = hepa1_central_test_df$`phi_hepatocytes 1` - hepa1_central_test_df$`phi_pericentral hepatocytes`) %>% drop_na() %>% arrange(metric)
+
+write.table(hepa1MinusPericentral_rnk, file = "~/Desktop/Mouse_liver_hepa1MinusPericentral.rnk", 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+```
+
+### Plot genes for celltypes
+
+```{r}
+cell_type = "hepatocytes 2"
+
+plot_me = phis_seed_avg %>% filter(cell == cell_type & as.numeric(double_freq_p_statistic) < 0.05) %>% arrange(as.numeric(double_freq_p_statistic)) %>% distinct(Row.names) %>% slice(1:5) %>% unname %>% unlist
+
+tmp = extract_clstr_prep_input(seurat_obj, cluster_id = cell_type, clip_sd = 15, normalize = T, num_replicates = 2, random_seed = 4)
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+#Recover time in hours that sample was collected
+matches <- stringr::str_match(colnames(pb_mat) , "ZT(\\d+)")
+ZT = as.numeric(matches[,2])
+
+#"#E69F00", "#56B4E9", "#F8766D","#F0E442"
+
+Orpheus::plot_rhythms(ZT, var_mat = var_mat, mean_mat = pb_mat, plot_me = plot_me, time_units = "hrs", point_color = "black", line_color = "#56B4E9")
+```
+
+### Pathway analysis
+
+```{r}
+library(msigdbr)
+
+mouse_reactome <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2", subcollection = "CP:REACTOME")
+
+
+pathway_strs = c("REACTOME_GLUCONEOGENESIS", "REACTOME_MITOCHONDRIAL_FATTY_ACID_BETA_OXIDATION", "REACTOME_UREA_CYCLE", "REACTOME_RESPIRATORY_ELECTRON_TRANSPORT", "REACTOME_METABOLISM_OF_LIPIDS", "REACTOME_GLUCOSE_METABOLISM", "REACTOME_CYTOCHROME_P450_ARRANGED_BY_SUBSTRATE_TYPE" )
+
+mouse_hallmark <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "MH")
+  
+pathway_strs = c("HALLMARK_OXIDATIVE_PHOSPHORYLATION", "HALLMARK_FATTY_ACID_METABOLISM", "HALLMARK_PEROXISOME", "HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY", "HALLMARK_GLYCOLYSIS", "HALLMARK_HYPOXIA", "HALLMARK_MTORC1_SIGNALING", "HALLMARK_XENOBIOTIC_METABOLISM")
+
+test_pathways = function(pathway_string, cell_type1, cell_type2){
+  pathway <- mouse_hallmark %>%
+  filter(gs_name == pathway_string) %>% select(gene_symbol) %>% unname %>% unlist
+  if(length(pathway)==0){message("Error, pathway not found.");return()}
+  
+  tmp = dplyr::filter(phis_seed_avg, cell %in% c(cell_type1, cell_type2))
+  if(length(table(tmp$cell)) != 2){message("Error with celltypes provided");return()}
+  cell_types_pathways = dplyr::filter(tmp, Row.names %in% pathway)
+  if(length(table(cell_types_pathways$cell)) != 2){message("Error, pathway not present for both cell types");return()}
+
+  unpaired_test = wilcox.test(phi ~ cell, data = cell_types_pathways)
+  return(unpaired_test)
+  # cell_types_pathways_paired
+  
+}
+
+test = sapply(pathway_strs, test_pathways, "periportal hepatocytes", "pericentral hepatocytes")
+test = sapply(pathway_strs, test_pathways, "hepatocytes 1", "hepatocytes 2")
+
+```
+
+### Theta analysis
+
+```{r}
+pp = filter(phis_seed_avg, cell == "periportal hepatocytes")
+plot(pp$theta, pp$phi)
+
+pc = filter(phis_seed_avg, cell == "pericentral hepatocytes")
+plot(pc$theta, pc$phi)
+```
+
+```{r}
+#Let's look at theta from when phi is calculable or from where double_freq_amplitude > V_2w_floor:
+
+theta_df = cos_phis_tmm %>% mutate(V_2w_floor = -(Ac^2/2)*theta) %>%
+  separate(Source, into = c("cell", "seed"), sep = "_seed") %>%
+  group_by(cell, Row.names) %>%
+  mutate(n_seeds = n_distinct(seed)) %>%
+  ungroup() %>%
+  filter(n_seeds == 4)
+
+#Now phis_consensus has repeat genes for each "seed"
+#gene count by cell type:
+theta_df %>% group_by(cell) %>% summarize(n_genes = n_distinct(Row.names))
+
+pval_cols = c("p_statistic", "double_freq_p_statistic")
+theta_df_consensus <- theta_df %>%
+  select(!contains("acrophase") & !contains("AIC") & !contains("BIC")) %>%
+  group_by(cell, Row.names) %>%
+  summarise(
+    across(all_of(pval_cols), max, na.rm = TRUE),
+    across(where(is.numeric) & !all_of(pval_cols), \(x) mean(x, na.rm = T)),
+    cell = first(cell),
+    .groups = "drop"
+  ) %>% filter(!is.nan(phi) | (double_freq_amplitude < V_2w_floor)  )
+
+
+clock_genes = c("ARNTL", "NPAS2","CLOCK","CRY1","CRY2","NR1D1","NR1D2",  "PER1","PER2","PER3","DBP","TEF","ARNTL2","RORA","FBXL3","CSNK1D","CSNK1E")
+
+theta_df_consensus = theta_df_consensus %>% mutate(clock_gene = toupper(Row.names) %in% clock_genes)
+
+theta_df_consensus 
+
+```
+
+```{r}
+cos_phis_no_kupffer = filter(cos_phis_tmm_filt, Source != "kupffer cells")
+kruskal.test(phi ~ Source, data = cos_phis_no_kupffer)
+pairwise.wilcox.test(cos_phis_no_kupffer$phi, cos_phis_no_kupffer$Source, p.adjust.method = "BH")
+
+cos_phis_subset = filter(cos_phis_tmm_filt, Source != "kupffer cells" & Source != "cholangiocytes")
+kruskal.test(phi ~ Source, data = cos_phis_subset)
+pairwise.wilcox.test(cos_phis_subset$phi, cos_phis_subset$Source, p.adjust.method = "BH")
+
+custom_colors <- c("cholangiocytes" = "#F8766D", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#ABA300", "hepatocytes 2" = "#0CB702", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#8494FF", "periportal hepatocytes" = "#FF68A1")
+
+liver_phi_boxplot = ggplot(cos_phis_tmm_filt, aes(x = Source,y =  phi, fill = Source))+
+  geom_boxplot(outlier.shape = NA)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (rad)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/liver_phi_boxplot.pdf", liver_phi_boxplot, device = "pdf", width = 6, height = 5)
+
+
+liver_phi_boxplot2 = ggplot(cos_phis_subset, aes(x = Source,y =  phi, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (rad)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/liver_phi_boxplot_subset_celltypes.pdf", liver_phi_boxplot2, device = "pdf", width = 6, height = 5)
+
+```
+
+```{r}
+ggplot(cos_phis_tmm_filt, aes(x = Source,y =  Ac))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Predicted cellular amplitude")+
+  ylab("Cell type")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )+ylim(0, 15)
+```
+
+```{r}
+acrodiff_compare = ggplot(cos_phis_no_kupffer, aes(x = acrodiff*12/pi)) +
+  geom_histogram(binwidth = 2, color = "black", fill = "steelblue") +
+  facet_wrap(~ as.factor(Source), scales = "free_y") +
+  xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
+  ylab("Count")+
+   theme_minimal()+
+  theme(
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )
+ggsave("~/Desktop/acrodiff_compare.pdf", plot = acrodiff_compare, device = "pdf", width = 7, height = 7)
+```
+
+```{r}
+gene_sets <- cos_phis_no_kupffer %>%
+  group_by(Source) %>%
+  summarise(genes = list(unique(Row.names))) %>%
+  deframe()
+
+peri_overlap = intersect(gene_sets$`pericentral hepatocytes`, gene_sets$`periportal hepatocytes`)
+
+peri_df = filter(cos_phis_no_kupffer, Source %in% c("pericentral hepatocytes","periportal hepatocytes" ) & Row.names %in% peri_overlap)
+
+pp_phi_compare = ggplot(peri_df, aes(x = Source,y =  phi*12/pi, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+ggsave("~/Desktop/periportal_vs_pericentral_phi_same_genes.pdf", pp_phi_compare, device = "pdf", width = 5, height = 5)
+
+pp_ac_compare = ggplot(peri_df, aes(x = Source,y =  Ac, fill = Source))+
+  geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted cell rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+ggsave("~/Desktop/periportal_vs_pericentral_Ac_same_genes.pdf", pp_ac_compare, device = "pdf", width = 5, height = 5)
+
+pp_bulk_amp_compare = ggplot(peri_df, aes(x = Source,y =  amplitude_bulk, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Measured bulk rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/periportal_vs_pericentral_bulk_amp_same_genes.pdf", pp_bulk_amp_compare, device = "pdf", width = 5, height = 5)
+
+peri_test_df <- peri_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = Source, values_from = c(phi, Ac))
+
+wilcox.test(peri_test_df$`phi_periportal hepatocytes`, peri_test_df$`phi_pericentral hepatocytes`, paired = T)
+
+wilcox.test(peri_test_df$`Ac_periportal hepatocytes`, peri_test_df$`Ac_pericentral hepatocytes`, paired = T)
+
+############### hepatocytes ########
+hepa_overlap = intersect(gene_sets$`hepatocytes 1`, gene_sets$`hepatocytes 2`)
+
+hepa_df = filter(cos_phis_no_kupffer, Source %in% c("hepatocytes 1","hepatocytes 2" ) & Row.names %in% hepa_overlap)
+
+hepa_phi_compare = ggplot(hepa_df, aes(x = Source,y =  phi*12/pi, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_phi.pdf", hepa_phi_compare, device = "pdf", width = 5, height = 5)
+
+hepa_ac_compare = ggplot(hepa_df, aes(x = Source,y =  Ac, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Prediceted cell rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_Ac.pdf", hepa_ac_compare, device = "pdf", width = 5, height = 5)
+
+hepa_bulk_amp_compare = ggplot(hepa_df, aes(x = Source,y =  amplitude_bulk, fill = Source))+
+  geom_boxplot()+
+  theme_minimal()+
+  xlab("Cell type")+
+  ylab("Measured bulk rhythm amp.")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )
+
+ggsave("~/Desktop/hepatocytes1v2_same_genes_bulk_amp.pdf", hepa_bulk_amp_compare, device = "pdf", width = 5, height = 5)
+
+hepa_test_df <- hepa_df %>%
+  pivot_wider(id_cols = "Row.names", names_from = Source, values_from = c(phi, Ac))
+
+wilcox.test(hepa_test_df$`phi_hepatocytes 1`, hepa_test_df$`phi_hepatocytes 2`, paired = T)
+
+wilcox.test(hepa_test_df$`Ac_hepatocytes 1`, hepa_test_df$`Ac_hepatocytes 2`, paired = T)
+
+
+
+```
+
+```{r}
+theta_plot= ggplot(cos_phis_no_kupffer, aes(x = coarse_theta, y = theta)) +
+  geom_point() +
+  facet_wrap(~ Source, scales = "free_y") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  xlim(c(-0.1, 2))+
+  ylim(c(-0.1, 2))+
+  theme(
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    legend.title = element_text(size = 12)
+  )+
+  xlab("Measured theta across timepoints")+
+  ylab("Predicted theta")
+
+ggsave("~/Desktop/theta_measured_v_pred.pdf", theta_plot, device = "pdf", width = 6.5, height = 5)
+
+```
+
+Write rnk files:
+
+```{r}
+# Create a directory to store the output files
+dir.create("~/Desktop/mouse_liver_phi_rnk")
+
+cos_phis_tmm_filt %>%
+  group_split(Source) %>%                           # Split into a list by Source
+  walk(~{
+    # For each dataframe in the list...
+    
+    # Get the unique source name for the filename
+    source_name <- .x$Source[1]
+    
+    # Construct the output filename
+    filename <- file.path("~/Desktop/mouse_liver_phi_rnk/", paste0(source_name, "_sorted_phi.rnk"))
+    
+    # Arrange by phi, select the two columns, and write to CSV
+    .x %>%
+      arrange(phi) %>%
+      select(Row.names, phi) %>%
+      write.table(file = filename, 
+                  row.names = FALSE,
+                  col.names = FALSE,
+                  sep = "\t",
+                  quote = F)
+      
+    # Print a message to the console
+    message(paste("Wrote file:", filename))
+  })
+
+
+```
+
+```{r}
+library(ggcorrplot)
+cos_phis_tmm_filt %>%
+    group_split(Source) %>%                           # Split into a list by Source
+    walk(~{
+        # For each dataframe in the list...
+        
+        # Get the unique source name for the filename
+        source_name <- .x$Source[1]
+
+        # Arrange by phi, select the two columns, and write to CSV
+        .x %>%
+            arrange(phi) %>%
+            select(Ac_pred,G_pred,theta, phi) %>%
+            cor() %>% ggcorrplot(.,title = source_name,  hc.order = F, type = "lower",
+               lab = TRUE, lab_size = 3,
+               colors = c("blue", "white", "red")) %>% print
+
+        
+    })
+```
