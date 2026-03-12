@@ -1,0 +1,269 @@
+---
+title: "ORPHEUS_demo"
+format: html
+editor: visual
+---
+
+## This script is a ORPHEUS demo/tutorial.
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(devtools)
+library(tidyverse)
+
+#If running from docker, this installation below is not needed:
+devtools::install_github("https://github.com/HenryHollis/Orpheus.git")
+
+library(Orpheus)
+```
+
+### Define function for simulating data:
+
+```{r}
+simulate_scRNAseq_circadian <- function(n = 10000, m = 5000, p_circ = 0.3,n_time_points = 6, 
+                                        phi_sd = 0.3, amp_ratio_range = c(.3, 0.75), G_range = c(0.05, 5), epsilon_sd = 0.,
+                                        theta_range = c(0.01,2.5), seed = 123) { 
+  set.seed(seed)
+  
+  # Time points
+  time_points <- seq(0, 2*pi, length.out = n_time_points) # Discrete time points for sampling
+  cell_time_indices <- sort(sample(1:n_time_points, n, replace = TRUE))
+  t_vals <- time_points[cell_time_indices] # Actual time for each cell
+  
+  # Assign circadian vs non-circadian genes
+  n_circ <- round(p_circ * m)
+  stopifnot(n_circ <= m)
+  circadian_gene_indices <- 1:n_circ # Row indices for circadian genes
+  
+  # Initialize expression matrix
+  expr_matrix <- matrix(0, nrow = m, ncol = n)
+  gene_names <- paste0("Gene", 1:m)
+  rownames(expr_matrix) <- gene_names
+  colnames(expr_matrix) <- paste0("Cell", 1:n)
+  
+  # Initialize data frame to store gene parameters
+  gene_parameters <- data.frame(
+    gene_id = gene_names,
+    theta_true = 0,
+    A_true = 0, # Amplitude, will be 0 for non-circadian
+    G_true = 0, # Baseline expression
+    V_w_theoret = 0,
+    V_2w_theoret = 0,
+    V_DC_theoret = 0,
+    S_amp_theoret = 0,
+    is_circadian = FALSE,
+    stringsAsFactors = FALSE
+  )
+
+  rownames(gene_parameters) <- gene_names
+  
+  
+  # Simulate circadian genes
+  if (n_circ > 0) {
+    for (i in 1:n_circ) {
+      gene_idx <- circadian_gene_indices[i] # Actual row index in expr_matrix
+      
+      #Select amp ratio
+      Amp_ratio_val <- runif(1, amp_ratio_range[1], amp_ratio_range[2])
+      #Select MESOR
+      G_val <- runif(1, G_range[1], G_range[2])
+      A_val <- Amp_ratio_val * G_val
+      stopifnot(A_val <= G_val) # Ensure baseline is at least amplitude (should be)
+      theta <- runif(1, theta_range[1], theta_range[2])
+      
+      esp = exp(-phi_sd^2)
+      es2p = exp(-2*phi_sd^2)
+      esp_half = exp(-phi_sd^2/2)
+      V_omega = A_val * esp_half * (1 + 2*theta*G_val)
+      V_2omega = (A_val^2/2) * (esp - (1+theta)*es2p)
+      V_DC = G_val + theta*G_val^2 + (1+theta)*epsilon_sd^2 + (A_val^2/2)*(1 + theta - esp)
+      
+      
+      # Store parameters
+      gene_parameters[gene_idx, "A_true"] <- A_val
+      gene_parameters[gene_idx, "G_true"] <- G_val
+      gene_parameters[gene_idx, "theta_true"] <- theta
+      gene_parameters[gene_idx, "is_circadian"] <- TRUE
+      gene_parameters[gene_idx, "V_w_theoret"] <- V_omega
+      gene_parameters[gene_idx, "V_2w_theoret"] <- V_2omega
+      gene_parameters[gene_idx, "V_DC_theoret"] <- V_DC
+      gene_parameters[gene_idx, "S_amp_theoret"] <- A_val*exp(-phi_sd^2/2)
+      
+      
+      phases_w_noise <- t_vals + rnorm(n, 0, phi_sd) # Cell-specific phase noise
+      cell_specific_epsilon_noise <- rnorm(n, 0, epsilon_sd) # Cell-specific expression noise
+      # repeat_nums <- table(t_vals)
+      # cell_specific_epsilon_noise <- rep(rnorm(n_time_points, 0, epsilon_sd), times = repeat_nums)
+      
+      if (gene_idx %% 2) { # Odd genes peak at t=0 (cosine)
+        lambdas <- A_val * cos(phases_w_noise) + G_val + cell_specific_epsilon_noise
+      } else { # Even genes peak at t=pi (cosine shifted)
+        lambdas <- A_val * cos(phases_w_noise - pi) + G_val + cell_specific_epsilon_noise
+      }
+      
+      # Ensure lambdas are non-negative (rpois requires lambda >= 0)
+      non_negative_lambdas <- pmax(0, lambdas) 
+      
+     
+      # For NB, mu is the mean. Size controls dispersion.
+      # var = mu + mu^2/size. If size=1, var = mu + mu^2. For large mu, var ~ mu^2.
+      counts <- rnbinom(n, size = 1/theta, mu = non_negative_lambdas)
+
+      
+      expr_matrix[gene_idx, ] <- counts
+    }
+  }
+  
+  # Simulate non-circadian genes
+  non_circadian_gene_indices <- setdiff(1:m, circadian_gene_indices)
+  if (length(non_circadian_gene_indices) > 0) {
+    for (gene_idx in non_circadian_gene_indices) {
+      G_val <- runif(1, G_range[1], G_range[2])
+      theta <- runif(1, theta_range[1], theta_range[2])
+      
+      # Store parameters (A is already 0, is_circadian is already FALSE)
+      gene_parameters[gene_idx, "G_true"] <- G_val
+      gene_parameters[gene_idx, "theta_true"] <- theta
+      
+      
+      cell_specific_epsilon_noise <- rnorm(n, 0, epsilon_sd)
+      # repeat_nums <- table(t_vals)
+      # cell_specific_epsilon_noise <- rep(rnorm(n_time_points, 0, epsilon_sd), times = repeat_nums)
+      mus <- G_val + cell_specific_epsilon_noise
+      
+      non_negative_mus <- pmax(0, mus)
+      counts <- rnbinom(n, size = 1/theta, mu = non_negative_mus)
+
+      
+      expr_matrix[gene_idx, ] <- counts
+    }
+  }
+  
+  # Metadata for cells
+  cell_metadata <- data.frame(
+    cell_id = colnames(expr_matrix),
+    time_point = t_vals # The "true" sampled time for each cell
+  )
+  
+  # Identify which gene names are circadian (can be derived from gene_parameters too)
+  circadian_gene_names <- gene_parameters$gene_id[gene_parameters$is_circadian]
+  
+  return(list(
+    counts = expr_matrix, 
+    cell_metadata = cell_metadata, 
+    gene_parameters = gene_parameters,
+    circadian_gene_ids = circadian_gene_names # More informative than just indices
+  ))
+}
+```
+
+### Simulate Counts Data
+
+```{r}
+#simulate genes with phase dispersion 2 hours (the convert to rads)
+phi_sd = 2*pi/12
+
+sim <- simulate_scRNAseq_circadian(n = 24000, m = 10000, p_circ = .2, phi_sd = phi_sd, n_time_points = 6, amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = 0.3, theta_range = c(0.1, 1.2))
+ 
+```
+
+### Create Seurat Object from Simulated Counts Data
+
+```{r}
+counts <- sim$counts
+metadata <- sim$cell_metadata
+gene_info <- sim$gene_parameters
+
+seurat_obj <- CreateSeuratObject(counts = counts, meta.data = metadata)
+seurat_obj$orig.ident = seurat_obj$time_point
+seurat_obj$seurat_clusters = "0"
+  
+```
+
+### Use ORPHEUS functions to norm and create bulk/variance time-courses
+
+```{r}
+#This function filters genes and norms counts for ORPHEUS
+#It creates a new assay called ORPHEUS_norm
+s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj)
+
+#This function creates the pseudobulk and intercell variance timecourses
+orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = "0", grouping_var = "seurat_clusters")
+  
+```
+
+### Quantify Rhythms and Calculate Phase Dispersion with ORPHEUS
+
+```{r}
+
+tmp = orpheus_inputs[[1]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+#Get the times at which the samples were collected
+ZT = as.numeric(colnames(pb_mat) )
+
+#Call built in orpheus rhythm detection (cosinor method)
+pb_cycling = is_cycling(ZT, pb_mat, time_units = "rad")
+
+#Get the significant cycling genes
+circ_genes = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
+
+#Get the phases of said genes
+circ_genes_phases = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(acrophase_bulk)  %>% unname %>% unlist %>% as.numeric
+
+#Use the built-in ORPHEUS function for finding 12hr rhythms
+var_cyclers = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
+
+#Call function that calculates phase-dispersion 
+phi = calc_phi( pb_cycling, var_cyclers, bulk_amp_thr = 0.5 )
+
+#We will create this dataframe with cycling parameters to join with the dataframe called phi above.
+input = var_cyclers %>% 
+  left_join(pb_cycling, by = "Gene_Symbols", suffix= c("_var", "_pb")) %>%
+  mutate(across(-Gene_Symbols, as.numeric)) %>%
+  filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
+  dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, everything()) %>%
+ filter( amplitude_bulk >= 0.5) %>%
+  column_to_rownames("Gene_Symbols")%>%
+  filter(partial_model_AIC_var > full_model_AIC_var)
+
+all.equal(rownames(phi), rownames(input))
+
+out_df = merge(input, phi, by = 0) %>%
+  merge(., gene_info, by.x="Row.names", by.y = 0)%>%
+  mutate(phase_error = (phi -phi_sd ))
+out_df$phi_true = phi_sd
+
+```
+
+### Recover Phase Standard Dev (2hrs)
+
+```{r}
+plot_df = filter(out_df, !is.na(phi))
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+ggplot(plot_df, aes(as.factor(phi_true*12/pi), phi*12/pi))+
+  geom_boxplot(fill = "skyblue",
+               outlier.shape = NA)+
+  theme_minimal()+
+  xlab("True phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 5))+
+  guides(fill = "none")    # remove fill legend
+```
