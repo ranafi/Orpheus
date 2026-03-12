@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">
-  <b>O</b>scillatory <b>R</b>hythm <b>P</b>hase <b>H</b>eterogeneity <b>E</b>stimated <b>U</b>sing <b>S</b>tatistical-moments
+  <strong>O</strong>scillatory <strong>R</strong>hythm <strong>P</strong>hase <strong>H</strong>eterogeneity <strong>E</strong>stimated <strong>U</strong>sing <strong>S</strong>tatistical-moments
 </h1>
 
 <p align="center">
