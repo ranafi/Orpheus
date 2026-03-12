@@ -696,7 +696,7 @@ oxphos_phis_plot <- ggplot(oxphos_df, aes(x = Source, y = phi*12/pi, fill = Sour
     method = "wilcox.test",         # Specify the statistical test
     comparisons = list(c("0", "1")), # A list of the pairs to compare
     label = "p.signif",             # Display significance levels
-    label.y = 7.5, # Adjust vertical position of the bar
+    label.y = 5, # Adjust vertical position of the bar
     tip.length = 0.02 # Length of the small vertical lines
   ) +
   # Add labels and a title
@@ -805,7 +805,7 @@ oxphos_Ac_plot <- ggplot(oxphos_df, aes(x = Source, y = Ac, fill = Source)) +
     method = "wilcox.test",         # Specify the statistical test
     comparisons = list(c("0", "1")), # A list of the pairs to compare
     label = "p.signif",             # Display significance levels
-    label.y = 7.5, # Adjust vertical position of the bar
+    label.y = 5, # Adjust vertical position of the bar
     tip.length = 0.02 # Length of the small vertical lines
   ) +
   # Add labels and a title
@@ -1349,19 +1349,21 @@ CTLminusAD_phis_enrichR = run_enrichR(CTLminusAD, dbs, prop = 0.3)
 Lets do this within just the AD folks:
 
 ```{r}
+library(Orpheus)
+
 file = c("../examples/exc35_ctl_ad_combined.h5Seurat")
 seurat_obj = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
 
 s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA" )
 
-s_obj_ad <- subset(s_obj, cond_cogdx == 1)
+# s_obj_ad <- subset(s_obj, cond_cogdx == 1)
 
-orpheus_inputs = calculate_orpheus_inputs(s_obj_ad, groups_to_analyze = unique(s_obj_ad$ceradsc_bin), grouping_var = "ceradsc_bin")
+orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$ceradsc_bin), grouping_var = "ceradsc_bin")
 
 # save(orpheus_inputs, file = "figures/rosmap_exc35/CERAD/AD_subjects_cerad/orpheus_inputs_ceradscbin_pb_var_list_ADsubsOnly.RData")
 
 #this code below correctly gets metadata for each subject:
-subject_meta <- s_obj_ad@meta.data %>%
+subject_meta <- s_obj@meta.data %>%
   group_by(individualID) %>%
   summarise(
     batch_bin = first(batch_bin),
@@ -1577,32 +1579,34 @@ ggsave("~/Desktop/matched_phi_boxplot_CERAD.pdf",matched_phi_boxplot, device = "
 ### Repeat the analysis for Braaksc bin
 
 ```{r}
+library(Orpheus)
 
 file = c("../examples/exc35_ctl_ad_combined.h5Seurat")
 seurat_obj = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
 
 s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA" )
 
-s_obj_ad <- subset(s_obj, cond_cogdx == 1)
-rm(s_obj)
+# s_obj_ad <- subset(s_obj, cond_cogdx == 1)
+#rm(s_obj)
 
-orpheus_inputs = calculate_orpheus_inputs(s_obj_ad, groups_to_analyze = unique(s_obj_ad$braaksc_bin), grouping_var = "braaksc_bin")
+orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$braaksc_bin), grouping_var = "braaksc_bin")
 
 # save(orpheus_inputs, file = "~/Desktop/orpheus_inputs_braakscbin_pb_var_list_ADsubsOnly.RData")
-subject_meta <- s_obj_ad@meta.data %>%
+subject_meta <- s_obj@meta.data %>%
   group_by(individualID) %>%
   summarise(
     batch_bin = first(batch_bin),
     sex = first(sex),
     pmi = first(pmi),
     times = first(times),
-    cond = first(cond_cogdx)
+    cond = first(cond_cogdx),
+    braaksc_bin = first(braaksc_bin)
   )
 
 
 
 cluster_phis = list()
-for(cell_type in c("[3,5)", "[5,7)" )){
+for(cell_type in names(orpheus_inputs)){
   
 print(paste("Analyzing condition", cell_type))
 
@@ -1691,6 +1695,8 @@ cos_phis_filt$Source = factor(cos_phis_filt$Source,levels = c("[0,3)", "[3,5)", 
 # Perform the Kruskal-Wallis test
 kruskal_result <- kruskal.test(phi ~ Source, data = cos_phis_filt)
 print(kruskal_result)
+pairwise_w_test = pairwise.wilcox.test(cos_phis_filt$phi, cos_phis_filt$Source, p.adjust.method = "BH")
+
 jitter_width <- 0.15
 jitter_seed <- 123 # A specific seed for reproducibility
 
@@ -1708,9 +1714,13 @@ p <- ggplot(cos_phis_filt, aes(x = Source, y = phi*12/pi, fill = Source)) +
   ) +
   stat_compare_means(
     method = "wilcox.test",         # Specify the statistical test
-    comparisons = list(c("[5,7)", "[3,5)")),
+    comparisons = list(c("[5,7)", "[3,5)"),
+                  c("[3,5)", "[0,3)"),
+                  c("[0,3)", "[5,7)")),
+    p.adjust.method = "BH",
+    paired = F,
     label = "p.signif",             # Display significance levels
-    label.y = 8, # Adjust vertical position of the bar
+    label.y = c(7.5, 8, 8.5), # Adjust vertical position of the bar
     tip.length = 0.02 # Length of the small vertical lines
   )+
   # Manually set the colors for fill and color aesthetics
@@ -1731,7 +1741,8 @@ p <- ggplot(cos_phis_filt, aes(x = Source, y = phi*12/pi, fill = Source)) +
     axis.title.x = element_text(size = 16),   # Increase x-axis title size
     axis.title.y = element_text(size = 16),   # Increase y-axis title size
     legend.title = element_text(size = 12),   # Increase legend title size
-  )
+  )+
+  ylim(c(0,10))
 
 median_df <- cos_phis_filt %>%
   dplyr::group_by(Source) %>%

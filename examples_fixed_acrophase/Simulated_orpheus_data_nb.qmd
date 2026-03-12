@@ -10,6 +10,7 @@ editor: visual
 library(Seurat)
 library(dplyr)
 library(Orpheus)
+library(tidyverse)
 ```
 
 ### Define simulation function
@@ -157,7 +158,8 @@ simulate_scRNAseq_circadian <- function(n = 10000, m = 5000, p_circ = 0.3,n_time
 
 ```{r}
 output = list()
-for(i in seq(0, 4.5, by = 0.5)){
+# for(i in seq(0, 4.5, by = 0.5)){
+for(i in seq(0, 7, by = 0.5)){
   print(paste0("phi = ", i))
   phi_sd = i/12*pi
   epsilon_sd = 0.3
@@ -234,7 +236,8 @@ for(i in seq(0, 4.5, by = 0.5)){
 
 #convert list into dataframe
 df = do.call(rbind, output)
-save(df, file = "~/Desktop/df_8kcells10kgenes_6times_epsilon03.RData")
+# save(df, file = "~/Desktop/df_8kcells10kgenes_6times_epsilon03.RData")
+save(df, file = "~/Desktop/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD.RData")
 
 ```
 
@@ -249,7 +252,7 @@ load("./figures/simulations/df_8kcells10kgenes_6times_epsilon03.RData")
 
 ```{r}
 #Keep rows of results where bulk amp > thresh & not NaN
-df_filt = dplyr::filter(df, !is.na(phi) & amplitude_bulk >= 0.5)
+df_filt = dplyr::filter(df, !is.na(phi) & amplitude_bulk >= 0.5 & phi_true*12/pi <= 5)
 
 #Plot: Phi sd pred acc vs true phi sd
 df_filt$phi_true_factor = as.factor(df_filt$phi_true*12/pi)
@@ -450,7 +453,8 @@ ggplot(df_fpr, aes(x = n, y = fpr, color = factor(phi_true*12/pi))) +
 
 ```{r}
 output_ideal = list()
-for(i in seq(0, 4.5, by = 0.5)){
+# for(i in seq(0, 4.5, by = 0.5)){
+for(i in seq(0, 7, by = 0.5)){
   print(paste0("phi = ", i))
   phi_sd = i/12*pi
   epsilon_sd = 0.3
@@ -523,7 +527,8 @@ for(i in seq(0, 4.5, by = 0.5)){
 
 #convert list into dataframe
 df_ideal = do.call(rbind, output_ideal)
-save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized.RData")
+# save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized.RData")
+save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD.RData")
 
 ```
 
@@ -531,7 +536,7 @@ save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized
 
 ```{r}
 #Keep rows of results where bulk amp > thresh & not NaN
-df_filt_ideal = dplyr::filter(df_ideal, !is.na(phi) & amplitude_bulk >= 0.5)
+df_filt_ideal = dplyr::filter(df_ideal, !is.na(phi) & amplitude_bulk >= 0.5 & phi_true*12/pi <= 5)
 
 #Plot: Phi sd pred acc vs true phi sd
 df_filt_ideal$phi_true_factor = as.factor(df_filt_ideal$phi_true*12/pi)
@@ -579,7 +584,9 @@ names(trials) <- paste0("V", seq(1,10))
 for(trial in 1:10){
 message("Trial:", trial)
 output = list()
-for(i in seq(0, 4.5, by = 0.5)){
+# for(i in seq(0, 4.5, by = 0.5)){
+for(i in seq(0, 7, by = 0.5)){
+
   message("Phi true:", i)
   phi_sd = i/12*pi
   epsilon_sd = 0.3
@@ -641,12 +648,13 @@ trials[[trial]] <- df
 rm(df)
 }
 
-#save(trials, file = "~/Desktop/realistic_sim_10Trials.RData")
-load("./figures/simulations/phi_accuracy_of_median_phis/realistic_sim_10Trials.RData")
+# save(trials, file = "~/Desktop/realistic_sim_10Trials_0to7hrsSTD.RData")
+load("./figures/simulations/bigger_phi_bounds/realistic_sim_10Trials_0to7hrsSTD.RData")
 trials_df =  do.call(rbind, trials)
 
 ########
-trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5)
+trials_df_filt = dplyr::filter(trials_df, !is.na(phi) &
+          amplitude_bulk >= 0.5 & phi_true*12/pi <= 5)
 median_df <- trials_df_filt %>%
   dplyr::group_by(trial, phi_true) %>%
   dplyr::summarise(median_phi = median(phi, na.rm = TRUE))
@@ -683,7 +691,7 @@ phi_acc_plot_medians_realistic = ggplot(median_df, aes(x = phi_true*12/pi,y =  m
     plot.title = element_text(size = 5)
   )+
   coord_fixed(ratio = 1)+
-  ylim(c(0, 5))+
+  #ylim(c(0, 6))+
   guides(fill = "none")    # remove fill legend
 ggsave("~/Desktop/phi_acc_plot_medians_realistic_points.pdf", plot = phi_acc_plot_medians_realistic, width = 4, height = 4, units = "in")  
 ```
@@ -696,7 +704,8 @@ names(trials) <- paste0("V", seq(1,10))
 for(trial in 1:10){
 message("Trial:", trial)
 output = list()
-for(i in seq(0, 4.5, by = 0.5)){
+# for(i in seq(0, 4.5, by = 0.5)){
+for(i in seq(0, 7, by = 0.5)){
   message("Phi true:", i)
   phi_sd = i/12*pi
   epsilon_sd = 0.3
@@ -758,12 +767,12 @@ trials[[trial]] <- df
 rm(df)
 }
 
-# save(trials, file = "~/Desktop/idealized_sim_10Trials.RData")
-load("./figures/simulations/phi_accuracy_of_median_phis/idealized_sim_10Trials.RData")
+# save(trials, file = "~/Desktop/idealized_sim_10Trials_0to7hrsSTD.RData")
+load("./figures/simulations/bigger_phi_bounds/idealized_sim_10Trials_0to7hrsSTD.RData")
 trials_df =  do.call(rbind, trials)
 
 ########
-trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5)
+trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5 & phi_true*12/pi <= 5)
 median_df <- trials_df_filt %>%
   dplyr::group_by(trial, phi_true) %>%
   dplyr::summarise(median_phi = median(phi, na.rm = TRUE))
@@ -800,17 +809,17 @@ phi_acc_plot_medians_idealized = ggplot(median_df, aes(x = phi_true*12/pi,y =  m
     plot.title = element_text(size = 5)
   )+
   coord_fixed(ratio = 1)+
-  ylim(c(0, 5))+
+  ylim(c(0,5.5))+
   guides(fill = "none")    # remove fill legend
 ggsave("~/Desktop/phi_acc_plot_medians_idealized_points.pdf", plot = phi_acc_plot_medians_idealized, width = 4, height = 4, units = "in")  
 ```
 
-### Repeat idea above (accuracy of cell-type phi) but using 15 gene-wise estimates (to resemble mouse SCN).
+### Repeat idea above (accuracy of cell-type phi) but using 10 gene-wise estimates (to resemble mouse SCN).
 
 ```{r}
-load("./figures/simulations/phi_accuracy_of_median_phis/realistic_sim_10Trials.RData")
+load("./figures/simulations/bigger_phi_bounds/realistic_sim_10Trials_0to7hrsSTD.RData")
 trials_df =  do.call(rbind, trials)
-trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5)
+trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5  & phi_true*12/pi <= 5)
 
 trials_df_filt %>% group_by(phi_true, trial) %>% summarize(count = n())
 set.seed(1234)
@@ -825,7 +834,7 @@ set.seed(1234)
 sampled_df <- map_dfr(1:10, \(i) {
   trials_df_filt %>%
     group_by(phi_true, trial) %>%
-    slice_sample(n = 15, replace = TRUE) %>%      # Set replace = TRUE here
+    slice_sample(n = 10, replace = TRUE) %>%      # Set replace = TRUE here
     mutate(sample_iteration = i)                  # Keep track of which sample this is
 }) %>%
   ungroup()
@@ -865,16 +874,16 @@ phi_acc_plot_medians_realistic_downsampled = ggplot(median_df, aes(x = phi_true*
     plot.title = element_text(size = 5)
   )+
   coord_fixed(ratio = 1)+
-  ylim(c(0, 5))+
+  #ylim(c(0, 5))+
   guides(fill = "none")    # remove fill legend
 
-ggsave("~/Desktop/phi_acc_plot_medians_realistic_15_genes_10_samplings_per_truePhi.pdf", plot = phi_acc_plot_medians_realistic_downsampled, width = 4, height = 4, units = "in")  
+ggsave("~/Desktop/phi_acc_plot_medians_realistic_10_genes_10_samplings_per_truePhi.pdf", plot = phi_acc_plot_medians_realistic_downsampled, width = 4, height = 4, units = "in")  
 ```
 
 ```{r}
-load("./figures/simulations/phi_accuracy_of_median_phis/idealized_sim_10Trials.RData")
+load("./figures/simulations/bigger_phi_bounds/idealized_sim_10Trials_0to7hrsSTD.RData")
 trials_df =  do.call(rbind, trials)
-trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5)
+trials_df_filt = dplyr::filter(trials_df, !is.na(phi) & amplitude_bulk >= 0.5 & phi_true*12/pi <= 5)
 
 set.seed(1234)
 # sampled_df <- trials_df_filt %>%
@@ -888,7 +897,7 @@ set.seed(1234)
 sampled_df <- map_dfr(1:10, \(i) {
   trials_df_filt %>%
     group_by(phi_true, trial) %>%
-    slice_sample(n = 15, replace = TRUE) %>%      # Set replace = TRUE here
+    slice_sample(n = 10, replace = TRUE) %>%      # Set replace = TRUE here
     mutate(sample_iteration = i)                  # Keep track of which sample this is
 }) %>%
   ungroup()
@@ -928,8 +937,8 @@ phi_acc_plot_medians_idealized_downsampled = ggplot(median_df, aes(x = phi_true*
     plot.title = element_text(size = 5)
   )+
   coord_fixed(ratio = 1)+
-  ylim(c(0, 5))+
+  #ylim(c(0, 5))+
   guides(fill = "none")    # remove fill legend
 
-ggsave("~/Desktop/phi_acc_plot_medians_idealized_15_genes_10_samplings_per_truePhi.pdf", plot = phi_acc_plot_medians_idealized_downsampled, width = 4, height = 4, units = "in")  
+ggsave("~/Desktop/phi_acc_plot_medians_idealized_10_genes_10_samplings_per_truePhi.pdf", plot = phi_acc_plot_medians_idealized_downsampled, width = 4, height = 4, units = "in")  
 ```
