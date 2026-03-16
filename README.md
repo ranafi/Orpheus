@@ -46,9 +46,9 @@ Modular
 
 Clean, interpretable output for downstream analysis
 
-📁 Example Data
+📁 How to use
 
-Example datasets and demo notebooks are available in the examples/ directory.
+Check examples/ORPHEUS_tutorial.qmd for demo notebook.
 
 🤝 Contributing
 

@@ -14,6 +14,7 @@
 # 3. EXCEPTION: Allow SPECIFIC examples only
 !examples/AD_cells.qmd
 !examples/mouse_liver_analysis.qmd
+!examples/ORPHEUS_tutorial.qmd
 !examples/mouse_SCN.qmd
 !examples/Simulated_orpheus_data_nb.qmd
 !examples/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat
