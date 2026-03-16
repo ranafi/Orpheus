@@ -4,9 +4,11 @@ format: html
 editor: visual
 ---
 
-Clean, less experimental version of mouse_liver_analysis_hepa_only.qmd
+### Read in Data
 
-### Read in Downloaded GEO counts:
+original study: Single-cell RNA sequencing of murine liver reveals an aligned circadian clock and cell-population specific circadian regulated pathways by Veltri et al.\
+
+<https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE29221>
 
 ```{r}
 library(Seurat)
@@ -37,6 +39,8 @@ VlnPlot(seurat_obj, features = c("nCount_RNA"), group.by = "ZT")
 
 table(seurat_obj$seurat_clusters, seurat_obj$orig.ident)
 ```
+
+For identifying rhythms in this dataset we use BooteJTK. As in the original publication, we do a pseudoreplication scheme. Cells are assigned to one of two pseudoreplicates for each timepoint. We do this partitioning 4 independent times (folds) and consider rhythms only when they are significant in all four folds.
 
 ```{r}
 # s_obj = subset(seurat_obj, subset = all_cell_types %in% c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes"))
@@ -196,7 +200,7 @@ write_all_bootejtk(all_results_combined,"~/Desktop/mouse_liver_pb/")
 
 #### Prepare variance signal for Bootejtk (all 4 subtypes)
 
-Now we need to isolate the 12-hr rhythms in variance to give to ejtk. Below I use regression to isolate the 12-hr components of variance 3 ways: modeling the variance without any priors about phase, and 2) using the phase from ejtk on bulk data, and 3) using y \~ pb residuals. In cases 1&2 I subtract out the contribution of variance from the 24-hr rhythm and non-rhythm.
+Now we need to isolate the 12-hr rhythms in variance to give to ejtk. Below I use regression to isolate the 12-hr components of variance 3 ways: modeling the variance without any priors about phase, and 2) using the phase from ejtk on bulk data, and 3) using y \~ pb residuals. In cases 1 & 2, I subtract out the contribution of variance from the 24-hr rhythm and non-rhythm.
 
 ```{r}
 prepare_var_for_ejtk <- function(times, var_mat, mean_mat, pb_phase_file, pb_cycling_sig_cutoff = 0.05) {
@@ -420,7 +424,7 @@ sapply(filenames, plot_free_acrodiff_ejtk, var_sig = 0.05)
 
 ### ORPHEUS, using the genes provided by BootEJTK
 
-Given significant cyclers from Bootejtk on pseudobulk, and targeted 12-hr rhythms in variance, run regression to get rhythmic parameters, ignoring any significance cutoffs from regression. I will use the pseudobulk data from all cells not pseudoreplicates
+Given significant cyclers from Bootejtk on pseudobulk, and targeted 12-hr rhythms in variance, run regression to get rhythmic parameters, ignoring any significance cutoffs from regression. I will use the pseudobulk data from all cells not pseudoreplicates here.
 
 ```{r}
 cell_types = c("hepatocytes 1", "hepatocytes 2", "periportal hepatocytes", "pericentral hepatocytes")
@@ -624,7 +628,7 @@ mouse_combined_phis %>% group_by(Source) %>% summarize(med = median(phi, na.rm =
 
 #### Plot some example gene traces
 
-Right now, this plots the data given to Bootejtk (4 cell types 1st fold), selecting the 3 most significant 12-hr rhythms from the Bootejtk (targeting all phases) analysis. The idea is, of the most significant 12-hr rhythms, the acrophase of the 24-hr rhythm is \~6 or 12 hr different
+This plots the data given to Bootejtk (4 cell types 1st fold), selecting the 3 most significant 12-hr rhythms from the Bootejtk (targeting all phases) analysis. The idea is, of the most significant 12-hr rhythms, the acrophase of the 24-hr rhythm is \~6 or 12 hr different
 
 ```{r}
 library(doParallel)
@@ -1544,6 +1548,8 @@ save(pathway_results, file ="./figures/mouse_liver_clean/Bootejtk_4_subtypes_dif
 
 #### Create Empirical Dist
 
+These cells are comparable via our boostrapping procedure: We will shuffle the hepatocyte label 1000 times and re-calculate phi in each shuffled label to see if there are significant cell-type differences.
+
 ```{r}
 
 s_obj = readRDS("../../Mouse_liver_data/liver_timecourse_seurat_object_hepa_only_ORPHEUS_norm.Rds")
@@ -1716,6 +1722,8 @@ phi_outputs <- append(phi_outputs, phi_output_i)
 # save(phi_outputs, file = "~/Desktop/mouse_liver_hepatocytes_null/mouse_liver_null_dist_phi_outputs.RData")
 ```
 
+Summarize empirical testing results.
+
 ```{r}
 load("figures/mouse_liver_clean/Bootejtk_4_subtypes_different_genes/HepaCombinedEjtkGenes_on_4_subtypes/mouse_liver_hepatocytes_null/mouse_liver_null_dist_phi_outputs.RData")
 
@@ -1778,9 +1786,9 @@ real_data_stats_df$p_value <- sapply(real_data_stats_df$abs_med_pp_pc_diff, p_em
 
 ```
 
-### causal pathway analysis
+### Pathway-activity stratified synchrony analysis
 
-Given that the phi estimates across hepatocytes are not significantly different, it doesn't make sense to look at correlations between cell type phis and cell type GSVA pathway scores. Here we do something similar to the AD data: Combine all hepatocytes together. Run GSVA to get a pathway score for each subject. Stratify the subjects based on pathway score, run ORPHEUS for each pathway and see which pathways have significant differences in phi.
+Run GSVA to get a pathway score for each cell. Stratify the cells based on pathway score, run ORPHEUS for each pathway and see which pathways have significant differences in phi.
 
 #### load logged counts for GSVA
 
@@ -1815,11 +1823,6 @@ load("figures/mouse_liver_clean/Bootejtk_hepatocytes_combined/causal_pathway_ana
 mouse_hallmark <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "MH")
 genesets_list <- split(mouse_hallmark$gene_symbol, mouse_hallmark$gs_name)
 
-# mouse_wiki <- msigdbr(db_species = "MM", species = "Mus musculus", collection = "M2", subcollection = "CP:WIKIPATHWAYS")
-# genesets_list <- split(mouse_wiki$gene_symbol, mouse_wiki$gs_name)
-
-#Custom pathways:
-# genesets_list = list("SCN_entrainment" = c("Nr3c1", "Tsc22d3", "Cirbp", "Hsf1", "Adrb2"), "Feeding_entrainment" = c("Insr", "Igf1r", "Slc2a2", "Gck", "Srebf1", "Pdk4"), "Combined_entrainment" = c("Nr3c1", "Tsc22d3", "Cirbp", "Hsf1", "Adrb2", "Insr", "Igf1r", "Slc2a2", "Gck", "Srebf1", "Pdk4"), "core_clock" = c("Clock", "Npas2", "Bmal1", "Bmal2", "Per1", "Per2","Per3", "Cry1", "Cry2", "Nr1d1", "Nr1d2", "Rora", "Rorb", "Rorc", "Fbxl3", "Csnk1d", "Csnk1e", "Tef"))
 ```
 
 #### Perform GSVA

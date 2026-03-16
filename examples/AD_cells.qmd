@@ -4,7 +4,12 @@ format: html
 editor: visual
 ---
 
-### Read in and process exc3.5 cells
+### Read in and process data
+
+AD ROSMAP data from from AD knowledge portal, accessed via Synapse:\
+<https://www.synapse.org/Synapse:syn31512863>\
+\
+Access requires a data use certificate: <https://adknowledgeportal.synapse.org/Data%20Access>.
 
 ```{r}
 library(tidyverse)
@@ -325,6 +330,8 @@ var_cycling_custom_fixed_acro <- function(times, var_mat, mean_mat, phase_pb, me
 #     cond = first(cond_cogdx)
 #   )
 # save(subject_meta, file = "./figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+#Load in subject metadata that I created above:
 load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
 
 cluster_phis = list()
@@ -350,8 +357,6 @@ agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
 rownames(agg_theta_meas) = rownames(pb_mat)
 
 
-
-# times = s_obj$times[match(colnames(pb_mat), s_obj$individualID)] %>% unname %>% unlist
 meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
 times = meta_data$times
 # stopifnot(all.equal(times, meta_data$times))
@@ -1257,8 +1262,7 @@ gsea_res <- GSEA(gene_list,
                  TERM2GENE = human_kegg,
                  pvalueCutoff = 1, 
                  minGSSize = 5, 
-                 maxGSSize = 500,
-                 seed = TRUE )      # Ensure reproducibility
+                 maxGSSize = 500 ) 
 
 # You can see them in gsea_res@result$Description
 pathways_to_plot <- c("KEGG_NEUROTROPHIN_SIGNALING_PATHWAY", "KEGG_ENDOCYTOSIS")
@@ -1291,8 +1295,7 @@ gsea_res <- GSEA(gene_list,
                  TERM2GENE = human_kegg,
                  pvalueCutoff = 1, 
                  minGSSize = 5, 
-                 maxGSSize = 500,
-                 seed = TRUE )      # Ensure reproducibility
+                 maxGSSize = 500)
 
 # You can see them in gsea_res@result$Description
 pathways_to_plot <- c("KEGG_OXIDATIVE_PHOSPHORYLATION", "KEGG_ENDOCYTOSIS")
@@ -1353,8 +1356,6 @@ CTLminusAD_phis_enrichR = run_enrichR(CTLminusAD, dbs, prop = 0.3)
 ```
 
 ### Repeat the analysis for CERAD score bins
-
-Lets do this within just the AD folks:
 
 ```{r}
 library(Orpheus)
@@ -1824,7 +1825,7 @@ ggsave("~/Desktop/matched_phi_boxplot_Braak.pdf",matched_phi_boxplot, device = "
 
 ```
 
-### Pathway Analysis by GSVA
+### Pathway-Activity stratified synchrony Analysis via GSVA
 
 Read in combined counts, aggregate raw counts to subject level, normalize with edgeR, compute the logcpm (which we will give to gsva). Run once, then read in for speed (that is why it is commented out).
 
@@ -1880,10 +1881,6 @@ load("../../figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
 human_hallmark <- msigdbr(db_species = "HS", species = "Homo sapiens", collection = "H")
 genesets_list <- split(human_hallmark$gene_symbol, human_hallmark$gs_name)
 
-# human_kegg <- msigdbr(db_species = "HS", species = "Homo sapiens",
-#                       collection = "C2", subcollection = "CP:KEGG_LEGACY")
-# genesets_list2 <- split(human_kegg$gene_symbol, human_kegg$gs_name)
-# genesets_list = c(genesets_list, genesets_list2)
 ```
 
 #### Read in cycling (in AD and CTL) results (genes with significance values).
@@ -1944,9 +1941,6 @@ exc35_CTL_tmm_non_rhythmic = df_logcpm_pseudobulk[CTL_non_cyclers$Gene_Symbols, 
   
 #Call GSVA, ranking CTL subjects by pathway score for all pathways
 gsva_res_ctl = gsva(as.matrix(exc35_CTL_tmm_non_rhythmic), genesets_list, min.sz =30) %>% as.data.frame
-# save(gsva_res_ctl, file ="~/Desktop/rosmap_exc35_ctl_gsva_matrix_keggHallmarkTogether_mnsize10.RData")
-# save(gsva_res_ctl, file ="~/Desktop/rosmap_exc35_ctl_gsva_matrix_keggHallmarkTogether_mnsize30.RData")
-# save(gsva_res_ctl, file = "~/Desktop/rosmap_exc35_ctl_gsva_matrix_kegg_mnsize30.RData")
 # save(gsva_res_ctl, file = "~/Desktop/rosmap_exc35_ctl_gsva_matrix_hallmark_mnsize30.RData")
 
 # Create a list to store results
@@ -2030,11 +2024,9 @@ pb_var_list <- append(pb_var_list, input_i)
 
 }
 save(pb_var_list, file = "~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_hallmark_tertiles_mnsize30_noCosinorFiltering.RData")
-# save(pb_var_list, file ="~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_keggHallmarkTogether_mnsize10.RData")
-# save(pb_var_list, file ="~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_hallmark_mnsize30.RData")
-# save(pb_var_list, file ="~/Desktop/rosmap_exc35_ctl_pb_var_matrices_list_kegg_mnsize30.RData")
+
 load("./figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ctl_pb_var_matrices_list_hallmark_tertiles_mnsize30_noCosinorFiltering.RData")
-# load("./figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ctl_pb_var_matrices_list_keggHallmarkTogether_mnsize30.RData")
+
 load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
 
 #---------------BEGIN new technique: cycling together--------------------  
@@ -2264,19 +2256,6 @@ save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_pathways_ctl/rosmap_exc
 stopCluster(cl)
 
 
-# wilcox_pvals <- sapply(stat_tests, function(x) x[["wilcox"]][["p.value"]])
-# wilcox_stat <- sapply(stat_tests, function(x) x[["wilcox"]][["statistic"]])
-# wilcox_paired_pvals <- sapply(stat_tests, function(x) x[["wilcox_paired"]][["p.value"]])
-# wilcox_paired_stat <- sapply(stat_tests, function(x) x[["wilcox_paired"]][["statistic"]])
-
-# wilcox.df = data.frame("pval" = wilcox_pvals,"test_stat" = wilcox_stat,  "BHQ" = p.adjust(wilcox_pvals, method = "BH"))
-# save(wilcox.df, file = "~/Desktop/rosmap_exc35_pathways_ctl/wilcox_df.RData")
-
-
-# kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
-# kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
-# save(kruskal.df, file = "~/Desktop/rosmap_exc35_pathways_ctl/kruskal_df.RData")
-# save(stat_tests, file = "~/Desktop/rosmap_exc35_pathways_ctl/stats_test.RData")
 ```
 
 #### GSVA pathways for AD
@@ -2290,10 +2269,9 @@ exc35_AD_tmm_non_rhythmic = df_logcpm_pseudobulk[AD_non_cyclers$Gene_Symbols, su
   
 #Call GSVA, ranking AD subjects by pathway score for all pathways
 gsva_res_ad = gsva(as.matrix(exc35_AD_tmm_non_rhythmic), genesets_list, min.sz =30) %>% as.data.frame
-# save(gsva_res_ad, file ="~/Desktop/rosmap_exc35_ad_gsva_matrix_keggHallmarkTogether_mnsize10.RData")
-# save(gsva_res_ad, file ="~/Desktop/rosmap_exc35_ad_gsva_matrix_keggHallmarkTogether_mnsize30.RData")
+
 # save(gsva_res_ad, file = "~/Desktop/rosmap_exc35_ad_gsva_matrix_hallmark_mnsize30.RData")
-# save(gsva_res_ad, file = "~/Desktop/rosmap_exc35_ad_gsva_matrix_kegg_mnsize30.RData")
+
 
 # Create a list to store results
 # #HALVES
@@ -2375,10 +2353,7 @@ pb_var_list <- append(pb_var_list, input_i)
 
 }
 save(pb_var_list, file = "~/Desktop/rosmap_exc35_ad_pb_var_matrices_list_hallmark_tertiles_mnsize30_noCosinorFiltering.RData")
-# save(pb_var_list, file = "~/Desktop/rosmap_exc35_ad_pb_var_matrices_list_keggHallmarkTogether_mnsize10.RData")
-# save(pb_var_list, file ="figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ad_pb_var_matrices_list_hallmark_mnsize30.RData")
-# save(pb_var_list, file ="figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ad_pb_var_matrices_list_kegg_mnsize30.RData")
-# load("figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ad_pb_var_matrices_list_keggHallmarkTogether_mnsize30.RData")
+
 load("figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ad_pb_var_matrices_list_hallmark_tertiles_mnsize30_noCosinorFiltering.RData")
 load("./figures/rosmap_exc35/subject_meta_cogdx.RData")
 
@@ -2598,15 +2573,7 @@ save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_pathways_ad/rosmap_exc3
 
 stopCluster(cl)
 
-# wilcox_pvals <- sapply(stat_tests, function(x) x[["wilcox"]][["p.value"]])
-# wilcox_stat <- sapply(stat_tests, function(x) x[["wilcox"]][["statistic"]])
-# wilcox.df = data.frame("pval" = wilcox_pvals,test_stat = wilcox_stat,  "BHQ" = p.adjust(wilcox_pvals, method = "BH"))
-# save(wilcox.df, file = "~/Desktop/rosmap_exc35_pathways_ad/wilcox_df.RData")
 
-# kruskal_pvals <- sapply(stat_tests, function(x) x[["kruskal"]][["p.value"]])
-# kruskal.df = data.frame("pval" = kruskal_pvals, "BHQ" = p.adjust(kruskal_pvals, method = "BH"))
-# save(kruskal.df, file = "~/Desktop/rosmap_exc35_pathways_ad/kruskal_df.RData")
-# save(stat_tests, file = "~/Desktop/rosmap_exc35_pathways_ad/stats_test.RData")
 ```
 
 #### How well correlated are the pathway scores with each other and with disease?
@@ -2661,34 +2628,6 @@ corrplot(
   col = colorRampPalette(c("blue", "white", "red"))(200)
 )
 
-#KEGG ctl
-load("figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ctl_gsva_matrix_kegg_mnsize30.RData")
-subject_meta_ctl_mat = filter(subject_meta, cond == 0) %>%
-    column_to_rownames(var = "individualID") %>%
-    select(c(sex, pmi, ceradsc, braaksc)) %>%
-    mutate(across(everything(), as.numeric)) %>%
-    t %>% as.matrix
-
-stopifnot(all.equal(colnames(subject_meta_ctl_mat), colnames(gsva_res_ctl)))
-
-gsva_res_ctl_w_meta <- rbind(gsva_res_ctl, subject_meta_ctl_mat)
-
-rownames(gsva_res_ctl_w_meta) = str_remove(rownames(gsva_res_ctl_w_meta), "KEGG_")
-
-pathway_cors = cor(t(gsva_res_ctl_w_meta))
-corrplot(
-  pathway_cors,
-  method = "color",
-  type = "upper",
-  order = "hclust",
-  tl.cex = 0.6,
-  tl.col = "black",
-  addCoef.col = "black", # Add coefficient of correlation
-  number.font = 1,
-  number.cex = .8,
-  col = colorRampPalette(c("blue", "white", "red"))(200)
-)
-
 #HALLMARK AD#
 load("figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ad_gsva_matrix_hallmark_mnsize30.RData")
 subject_meta_ad_mat = filter(subject_meta, cond == 1) %>%
@@ -2717,33 +2656,6 @@ corrplot(
   col = colorRampPalette(c("blue", "white", "red"))(200)
 )
 
-#Kegg AD#
-load("figures/rosmap_exc35/pathway_analysis/rosmap_exc35_ad_gsva_matrix_kegg_mnsize30.RData")
-subject_meta_ad_mat = filter(subject_meta, cond == 1) %>%
-    column_to_rownames(var = "individualID") %>%
-    select(c(sex, pmi, ceradsc, braaksc)) %>%
-    mutate(across(everything(), as.numeric)) %>%
-    t %>% as.matrix
-
-stopifnot(all.equal(colnames(subject_meta_ad_mat), colnames(gsva_res_ad)))
-
-gsva_res_ad_w_meta <- rbind(gsva_res_ad, subject_meta_ad_mat)
-
-rownames(gsva_res_ad_w_meta) = str_remove(rownames(gsva_res_ad_w_meta), "KEGG_")
-
-pathway_cors = cor(t(gsva_res_ad_w_meta))
-corrplot(
-  pathway_cors,
-  method = "color",
-  type = "upper",
-  order = "hclust",
-  tl.cex = 0.6,
-  tl.col = "black",
-  addCoef.col = "black", # Add coefficient of correlation
-  number.font = 1,
-  number.cex = .6,
-  col = colorRampPalette(c("blue", "white", "red"))(200)
-)
 
 ######### Looking at my significant results only #####
 load("./figures/rosmap_exc35/pathway_approach2/rosmap_exc35_ad_gsva_matrix_keggHallmarkTogether_mnsize10.RData")
@@ -2795,7 +2707,7 @@ subject_meta <- s_obj@meta.data %>%
 
 ```
 
-#### Generate random grp assignments for CTL subs
+#### Generate random group assignments for CTL subs
 
 ```{r}
 set.seed(1234)
@@ -3573,27 +3485,5 @@ ad_stats_df$p_value <- sapply(ad_stats_df$abs_med_diff, p_empirical, null_vec = 
 ad_stats_df$BHQ = p.adjust(ad_stats_df$p_value, method = "BH")
 
 # write.table(ad_stats_df, file = "./figures/rosmap_exc35/pathway_approach2/hallmark_ad_tertiles_mnsize30_noCosinorFiltering/rosmap_exc35_ad_pathways_significance_result.csv", sep = ",", row.names = F)
-
-```
-
-### Paired, non-parametric tests of phi between high and low groups:
-
-```{r}
-load("figures/rosmap_exc35/pathway_analysis/hallmark_kegg_together_ctl_halves_mnsize10/rosmap_exc35_ctl_pathway_phis.RData")
-
-ctl_all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, pathway = .y)) %>%
-  mutate(Source = factor(Source, levels = c("high", "low")))
-
-#Unpaired version:
-wilcox_unpaired <- ctl_all_pathway_phis_df %>%
-  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
-  group_by(pathway) %>%
-  summarise(
-    n_low = sum(Source == levels(Source)[1]),
-    n_high = sum(Source == levels(Source)[2]),
-    p_value = wilcox.test(phi ~ Source)$p.value,
-    statistic = wilcox.test(phi ~ Source)$statistic,
-    .groups = "drop"
-  )%>% mutate(normed_stat = statistic/(n_low*n_high))
 
 ```

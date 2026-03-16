@@ -7,8 +7,14 @@ editor: visual
 ```{r}
 library(Seurat)
 library(dplyr)
+library(tidyverse)
+library(Orpheus)
 
 ```
+
+### Load in data
+
+<https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE117295>
 
 ```{r}
 # Path to your GSE folder
@@ -60,6 +66,8 @@ head(combined@meta.data)
 
 ```
 
+The cell clustering from the original authors is not available on GEO and we had to contact the authors. See data availability statement from original paper: <https://www.nature.com/articles/s41593-020-0586-x#data-availability>
+
 ```{r}
 #--------------------------
 # load("../../Mouse_SCN/AllCells/gene_L_800cluster.Robj")
@@ -108,15 +116,13 @@ joined_seurat_obj$coarse_clusters <- case_when(
   TRUE ~ as.character(joined_seurat_obj$seurat_clusters) # keep everything else as-is
 )
 
-################BEGIN NEW 11/25/25################
-
 # Remove ".1" suffix if present
 make_bare <- function(x) gsub("\\.1$", "", x)
 # GEO
-geo_raw      <- gsub("_.*", "", colnames(joined_seurat_obj))    # raw barcode (still has .1)
-geo_time     <- as.numeric(gsub(".*_", "", colnames(joined_seurat_obj)))  # time
-geo_bare     <- make_bare(geo_raw)
-# GEO lookup: bare barcode → times present
+geo_raw <- gsub("_.*", "", colnames(joined_seurat_obj)) #raw barcode (still has .1)
+geo_time <- as.numeric(gsub(".*_", "", colnames(joined_seurat_obj)))  # time
+geo_bare <- make_bare(geo_raw)
+# GEO lookup: bare barcode -> times present
 geo_lookup <- tibble(
   raw  = geo_raw,
   bare = geo_bare,
@@ -178,7 +184,7 @@ scn_df
 
 table(scn_df$ambiguous)
 
-#But some of the ambiguity comes from a barcode matching a Neuron and some other cell type.
+#But some of the ambiguity comes from a barcode matching a neuron and some other cell type.
 #Since SCN subtypes are all neurons, I can subset to neurons and repeat:
 Neurons = subset(joined_seurat_obj, coarse_clusters == "Neurons")
 geo_raw_neuron  <- gsub("_.*", "", colnames(Neurons))
@@ -529,7 +535,7 @@ plot_free_acrodiff_ejtk = function(cell_type, var_sig = 0.05){
 
   merged_filt = dplyr::filter(merged_res, Pvalue < var_sig) %>% mutate(acrodiff = (PhaseMean12 - PhaseMean) %% 12)
 
- hist(merged_filt$acrodiff, main = cell_type, breaks = seq(0, 12, by = 2))
+ # hist(merged_filt$acrodiff, main = cell_type, breaks = seq(0, 12, by = 2))
  fill_col <- switch(
   cell_type,
   "avpnms" = "#F8766D",
@@ -579,7 +585,7 @@ library(tidyverse)
 library(Orpheus)
 
 #Load seurat object with combated assay:
-load("../examples_fixed_acrophase/figures/mouse_SCN/mouse_SCN_neuronSubset_seurat_obj_w_combat_assay.RData")
+load("./figures/mouse_SCN/mouse_SCN_neuronSubset_seurat_obj_w_combat_assay.RData")
 
 orpheus_inputs_combat = calculate_orpheus_inputs(s_obj, groups_to_analyze = c("avp/nms","cck/bdnf","cck/c1ql3","vip/grp", "vip/nms"), grouping_var = "neuron_subcluster", assay_to_use = "ORPHEUS_norm_ComBat" )
 
@@ -844,8 +850,9 @@ ggsave("~/Desktop/BOXPLOT_COMBAT_mouse_SCN_neuronSubtype_phis_EJTK_list_to_regre
 
 ```{r}
 library(doParallel)
+library(patchwork)
 plot_rhythms <- function(cell_type, times, var_mat, mean_mat, plot_me = c(), time_units = "hrs", line_thickness = 1, point_size = 3, line_color = "red", point_color = "blue") {
-  gene1 <- t(var_mat)  # get the transpose, subjects x genes and put in order of CYCLOPS order
+  gene1 <- t(var_mat)  
   means1 <- t(mean_mat)
   
   if (time_units == "hrs") {
