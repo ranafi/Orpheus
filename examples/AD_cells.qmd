@@ -678,8 +678,16 @@ ggsave("~/Desktop/matched_phi_scatter.pdf", plot = p_scatter, device = "pdf", wi
 
 
 #OXPHOS boxplots:
+
 # Create the plot
 oxphos_df = filter(cos_phis_filt, !is.na(oxphos_genes))
+
+# Perform the Wilcoxon Rank Sum test
+wilcox_result_phi_oxphos <- wilcox.test(phi ~ Source, data = oxphos_df)
+print(wilcox_result_phi_oxphos)
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
 
 oxphos_phis_plot <- ggplot(oxphos_df, aes(x = Source, y = phi*12/pi, fill = Source)) +
   geom_boxplot(outlier.shape = NA, alpha = 0.7) +
@@ -1589,7 +1597,15 @@ s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA" )
 # s_obj_ad <- subset(s_obj, cond_cogdx == 1)
 #rm(s_obj)
 
-orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$braaksc_bin), grouping_var = "braaksc_bin")
+#Bin braaksc into two groups:
+s_obj@meta.data =s_obj@meta.data%>%  mutate(
+    braaksc_2bins = case_when(
+      braaksc %in% c(0, 1, 2, 3) ~ "low",
+      braaksc %in% c(4, 5, 6) ~ "high",
+      TRUE ~ NA
+    ))
+
+orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$braaksc_2bins), grouping_var = "braaksc_2bins")
 
 # save(orpheus_inputs, file = "~/Desktop/orpheus_inputs_braakscbin_pb_var_list_ADsubsOnly.RData")
 subject_meta <- s_obj@meta.data %>%
@@ -1690,7 +1706,8 @@ library(tidyverse)
 cos_phis_filt = filter(cos_phis_braak, !is.na(phi))
 
 
-cos_phis_filt$Source = factor(cos_phis_filt$Source,levels = c("[0,3)", "[3,5)", "[5,7)"))
+# cos_phis_filt$Source = factor(cos_phis_filt$Source,levels = c("[0,3)", "[3,5)", "[5,7)"))
+cos_phis_filt$Source = factor(cos_phis_filt$Source,levels = c("low", "high"))
 
 # Perform the Kruskal-Wallis test
 kruskal_result <- kruskal.test(phi ~ Source, data = cos_phis_filt)
@@ -1702,7 +1719,7 @@ jitter_seed <- 123 # A specific seed for reproducibility
 
 
 # Define a colorpallete
-color_palette <- c("[0,3)" = "#66C5CC", "[3,5)" = "#F6CF71", "[5,7)" ="#F89C74")
+color_palette <- c("low" = "skyblue", "high" = "salmon")
 
 # Create the plot
 p <- ggplot(cos_phis_filt, aes(x = Source, y = phi*12/pi, fill = Source)) +
@@ -1712,17 +1729,13 @@ p <- ggplot(cos_phis_filt, aes(x = Source, y = phi*12/pi, fill = Source)) +
   alpha = 0.4,
   position = position_jitter(width = jitter_width, seed = jitter_seed)
   ) +
-  stat_compare_means(
+   stat_compare_means(
     method = "wilcox.test",         # Specify the statistical test
-    comparisons = list(c("[5,7)", "[3,5)"),
-                  c("[3,5)", "[0,3)"),
-                  c("[0,3)", "[5,7)")),
-    p.adjust.method = "BH",
-    paired = F,
+    comparisons = list(c("low", "high")), # A list of the pairs to compare
     label = "p.signif",             # Display significance levels
-    label.y = c(7.5, 8, 8.5), # Adjust vertical position of the bar
+    label.y = 8, # Adjust vertical position of the bar
     tip.length = 0.02 # Length of the small vertical lines
-  )+
+  ) +
   # Manually set the colors for fill and color aesthetics
   scale_fill_manual(values = color_palette) +
   scale_color_manual(values = color_palette) +
@@ -1778,7 +1791,7 @@ matched_phi_boxplot = ggplot(df_matched, aes(Source, phi*12/pi, fill = Source))+
   ) +
   stat_compare_means(
     method = "wilcox.test",         # Specify the statistical test
-    comparisons = list(c("[5,7)", "[3,5)")),
+    comparisons = list(c("low", "high")),
     label = "p.signif",             # Display significance levels
     label.y = 8, # Adjust vertical position of the bar
     tip.length = 0.02 # Length of the small vertical lines
