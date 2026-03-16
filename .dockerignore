@@ -12,11 +12,11 @@
 !README.md
 
 # 3. EXCEPTION: Allow SPECIFIC examples only
-!examples_fixed_acrophase/AD_cells.qmd
-!examples_fixed_acrophase/mouse_liver_analysis_CLEAN.qmd
-!examples_fixed_acrophase/mouse_SCN.qmd
-!examples_fixed_acrophase/Simulated_orpheus_data_nb.qmd
-!examples_fixed_acrophase/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat
+!examples/AD_cells.qmd
+!examples/mouse_liver_analysis.qmd
+!examples/mouse_SCN.qmd
+!examples/Simulated_orpheus_data_nb.qmd
+!examples/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat
 
 
 # 4. EXCEPTION: Allow the Dockerfile itself 

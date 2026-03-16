@@ -6,8 +6,8 @@
 ^docs/
 _pkgdown.yml
 R/estimate_single_phi.R
-^examples_fixed_acrophase/
-^examples_old/
+^examples_old_notFixedAcrophase/
+^examples_oldest/
 Dockerfile
 build_and_run_docker.sh
 R/.Rhistory
