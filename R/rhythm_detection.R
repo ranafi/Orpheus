@@ -106,8 +106,7 @@ is_cycling <- function(times, pb_mat, time_units = "hrs") {
 #' @param phase_pb A numeric vector of pseudobulk acrophases (in radians) for each gene, typically obtained from `is_cycling()`.
 #' @param time_units A string indicating the time units ("hrs" for hours or "radians" for radians). Default is "hrs".
 #' @return A tibble summarizing double-frequency rhythmicity metrics for each gene, including acrophase, amplitude, p-values, and adjusted p-values.
-
-#' @export
+#' @noRd
 var_cycling <- function(times, var_mat, mean_mat, phase_pb, time_units = "hrs") {
   `%do%` <- foreach::`%do%`
   cat(paste("\nRunning var_cycling()"))

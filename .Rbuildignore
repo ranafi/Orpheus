@@ -11,3 +11,4 @@ R/estimate_single_phi.R
 Dockerfile
 build_and_run_docker.sh
 R/.Rhistory
+.Rhistory

@@ -3,6 +3,7 @@
 <url><loc>/authors.html</loc></url>
 <url><loc>/index.html</loc></url>
 <url><loc>/reference/calc_phi.html</loc></url>
+<url><loc>/reference/calculate_orpheus_inputs.html</loc></url>
 <url><loc>/reference/cycling_meta2d.html</loc></url>
 <url><loc>/reference/estimate_CI.html</loc></url>
 <url><loc>/reference/estimate_single_phi.html</loc></url>
@@ -12,7 +13,9 @@
 <url><loc>/reference/is_cycling.html</loc></url>
 <url><loc>/reference/objective.html</loc></url>
 <url><loc>/reference/plot_rhythms.html</loc></url>
+<url><loc>/reference/prepare_seurat_for_orpheus.html</loc></url>
 <url><loc>/reference/run_meta2d.html</loc></url>
+<url><loc>/reference/sparse_filter_by_expr.html</loc></url>
 <url><loc>/reference/var_cycling.html</loc></url>
 <url><loc>/reference/var_cycling_fix_acro.html</loc></url>
 </urlset>

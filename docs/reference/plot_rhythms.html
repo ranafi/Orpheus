@@ -44,7 +44,17 @@
     </div>
 
     <div id="ref-usage">
-    <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">plot_rhythms</span><span class="op">(</span><span class="va">times</span>, <span class="va">var_mat</span>, <span class="va">mean_mat</span>, plot_me <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="op">)</span>, time_units <span class="op">=</span> <span class="st">"hrs"</span><span class="op">)</span></span></code></pre></div>
+    <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">plot_rhythms</span><span class="op">(</span></span>
+<span>  <span class="va">times</span>,</span>
+<span>  <span class="va">var_mat</span>,</span>
+<span>  <span class="va">mean_mat</span>,</span>
+<span>  plot_me <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="op">)</span>,</span>
+<span>  time_units <span class="op">=</span> <span class="st">"hrs"</span>,</span>
+<span>  line_thickness <span class="op">=</span> <span class="fl">1</span>,</span>
+<span>  point_size <span class="op">=</span> <span class="fl">3</span>,</span>
+<span>  line_color <span class="op">=</span> <span class="st">"red"</span>,</span>
+<span>  point_color <span class="op">=</span> <span class="st">"blue"</span></span>
+<span><span class="op">)</span></span></code></pre></div>
     </div>
 
     <div id="arguments">
@@ -69,6 +79,22 @@
 
 <dt id="arg-time-units">time_units<a class="anchor" aria-label="anchor" href="#arg-time-units"></a></dt>
 <dd><p>A string indicating the time units ("hrs" for hours or "radians" for radians). Default is "hrs".</p></dd>
+
+
+<dt id="arg-line-thickness">line_thickness<a class="anchor" aria-label="anchor" href="#arg-line-thickness"></a></dt>
+<dd><p>A numeric value specifying the thickness of the lines in the plots. Default is 1.</p></dd>
+
+
+<dt id="arg-point-size">point_size<a class="anchor" aria-label="anchor" href="#arg-point-size"></a></dt>
+<dd><p>A numeric value specifying the size of the points in the plots. Default is 3.</p></dd>
+
+
+<dt id="arg-line-color">line_color<a class="anchor" aria-label="anchor" href="#arg-line-color"></a></dt>
+<dd><p>A string specifying the color of the lines in the plots. Default is "red".</p></dd>
+
+
+<dt id="arg-point-color">point_color<a class="anchor" aria-label="anchor" href="#arg-point-color"></a></dt>
+<dd><p>A string specifying the color of the points in the plots. Default is "blue".</p></dd>
 
 </dl></div>
     <div id="value">
