@@ -22,8 +22,7 @@ The tool is designed for use with circadian gene expression data, and is suited 
 
 ## 📄 Paper
 
-> 📌 *Coming soon!*  
-> [Link to preprint or publication will be available here.]
+> 📌 https://www.biorxiv.org/content/10.64898/2026.03.23.713759v1
 
 ---
 
