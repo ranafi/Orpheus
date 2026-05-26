@@ -53,11 +53,22 @@ exc35=filter(cos_phis_tmm, !is.na(phi)) %>% select(c("Row.names","Source","cell_
   rename("condition" = "Source") %>%
   rename("NB_theta" = "theta") %>%
   rename("phi_phase_dispersion" = "phi")
+
+load("./figures/rosmap_exc35/ORPHEUS_on_Exc35DR_genes//phis_exc35_CTLvAD_tested_exc35DRgenes.RData")
+phi_results_exc35DR_rhythms_tested$cell_type = "excitatory_neurons35"
+exc35_DRgenes=filter(phi_results_exc35DR_rhythms_tested, !is.na(phi)) %>% select(c("Row.names","Source","cell_type", "G", "Ac","theta", "phi", "double_freq_amplitude", "fund_amp","var_mesor", "amplitude_bulk", "mesor_bulk","acrophase_bulk",  "partial_model_AIC_var", "full_model_AIC_var"  )) %>% rename("12hr_amp_var" = "double_freq_amplitude") %>%
+  rename("24hr_amp_var" = "fund_amp") %>%
+  rename("24hr_amp_bulk" = "amplitude_bulk") %>%
+  rename("mesor_var" = "var_mesor")%>%
+  rename("genes" = "Row.names") %>%
+  rename("condition" = "Source") %>%
+  rename("NB_theta" = "theta") %>%
+  rename("phi_phase_dispersion" = "phi")
 ```
 
 ```{r}
 library(writexl)
-list_of_data <- list("mouse SCN" = SCN, "mouse hepatocytes combined" = hepa_combined, "mouse hepatocytes separate" = hepa_sep, "Human exc neurons" = exc35)
+list_of_data <- list("mouse SCN" = SCN, "mouse hepatocytes combined" = hepa_combined, "mouse hepatocytes separate" = hepa_sep,"Human exc neurons DR genes" = exc35_DRgenes, "Human exc neurons cycling genes" = exc35)
 write_xlsx(list_of_data, path = "~/Desktop/tab_S1.xlsx")
 
 ```

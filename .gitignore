@@ -23,4 +23,10 @@ examples/AD_cells_extraCode.qmd
 examples/Simulated_orpheus_data_nb_experimental.qmd
 examples/mouse_liver_analysis_CLEAN.qmd
 examples/OLD_mouse_liver_analysis_hepa_only.qmd
+examples/OLD_mouse_liver_analysis.qmd]
+examples/AD_cerad_empirical_tests
+examples/AD_cogdx_empirical_tests
+examples/amp_variance_in_ORPHEUS_test.qmd
+examples/AD_cells_test_DR_genes.qmd
+examples/AD_cells_empirical_fraction_test.qmd
 examples/OLD_mouse_liver_analysis.qmd

@@ -793,7 +793,7 @@ oxphos_median_df_pb <- oxphos_df %>%
   dplyr::summarise(median_pb_amp = median(amplitude_bulk, na.rm = TRUE))
 
 oxphos_pb_plot <- oxphos_pb_plot+geom_text(
-  data = oxphos_median_pb,
+  data = oxphos_median_df_pb,
   aes(x = Source, y = median_pb_amp, label = round(median_pb_amp, 2)),
   vjust = -0.3,
   hjust = 3,
@@ -1165,7 +1165,837 @@ acrodiff_compare_CTL = ggplot(filter(acrodiffs_df, Source =="0"), aes(x = acrodi
 # ggsave("~/Desktop/rosmap_exc35_ctl_acrodiff.pdf", acrodiff_compare_CTL, width = 5, height = 3)
 ```
 
-### Write out RNK files:
+### Create empirical distribution for significance testing
+
+```{r}
+library(tidyverse)
+library(Seurat)
+library(SeuratDisk)
+library(Matrix)
+library(Orpheus)
+
+file = "figures/rosmap_exc35/exc35_ctl_ad_combined_w_Orpheus_norm_layer.h5Seurat"
+s_obj = LoadH5Seurat(file, assays = c("ORPHEUS_norm"), reductions = F, graphs = F, neighbors = F, images = F)
+
+subject_meta <- s_obj@meta.data %>%
+  group_by(individualID) %>%
+  summarise(
+    batch_bin = first(batch_bin),
+    sex = first(sex),
+    pmi = first(pmi),
+    times = first(times),
+    cond = first(cond_cogdx),
+    ceradsc = first(ceradsc),
+    ceradsc_bin = first(ceradsc_bin),
+    braaksc = first(braaksc),
+    braaksc_bin = first(braaksc_bin)
+  )
+
+#################
+subject_meta = filter(subject_meta, batch_bin != "[4,10)")
+table(subject_meta$batch_bin, subject_meta$cond)
+s_obj = subset(s_obj, subset = individualID %in% subject_meta$individualID)
+
+###################
+
+set.seed(1234)
+
+n_perm <- 1000
+labels <- c(rep(0, 217), rep(1, 148))
+
+perm_mat <- replicate(
+  n_perm,
+  sample(labels)
+)
+rownames(perm_mat) = subject_meta$individualID
+
+#Join subject metadata to permutation mat
+perm_mat_w_meta = merge(perm_mat, subject_meta, by.x = 0, by.y= "individualID") %>% column_to_rownames(var = "Row.names")
+
+# #Loop through all the perms and create pb and variance matrices for each,
+#We will store these so I only have to do it once.
+
+pb_var_list <- vector("list", ncol(perm_mat))
+names(pb_var_list) <- paste0("V", seq(1,n_perm))
+
+for(i in 1:ncol(perm_mat)){
+
+message("Analyzing Perm ", i)
+table(perm_mat_w_meta[,i])
+
+# Add the new metadata to the Seurat object
+stopifnot(!anyDuplicated(rownames(perm_mat_w_meta)))
+s_obj$strat <- perm_mat_w_meta[match(s_obj$orig.ident, rownames(perm_mat_w_meta)), i]
+
+stopifnot(setequal(s_obj$orig.ident, subject_meta$individualID))
+
+
+orpheus_input_i = calculate_orpheus_inputs(s_obj, groups_to_analyze = c(0,1), grouping_var = "strat")
+
+orpheus_input_sans_counts <- lapply(orpheus_input_i, function(x) x[-3])
+# Assign by index (Direct insertion, no copying of the full list)
+  pb_var_list[[i]] <- orpheus_input_sans_counts
+
+  # Explicitly remove the heavy object
+  rm(orpheus_input_i)
+
+  # Garbage Collection
+  gc()
+}
+
+save(pb_var_list, file ="~/Desktop/rosmap_exc35_cogdx_AD_vs_CTL_pb_var_matrices_list_randomAssignment_for_null_dist_1000trials.RData")
+```
+
+### ORHPEUS on exc35 differentially rhythmic genes
+
+See <https://www.cell.com/neuron/fulltext/S0896-6273(25)00517-3>
+
+```{r}
+#Load in PB and Var lists
+load("exc35_ctl_ad_pb_var_list.RData")
+#Load in subject metadata that I created above:
+load("figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+DR_genes = read_csv("~/Box Sync/Henry_stuff/AD_project/scROSMAP/scrosmap_newAtlas/scROSMAP_project/Cyclops_ordering/downstream_output_Exc3_5/enrichR_files/DR_cyclers_CyclingBHQ1AR33_DRBHQ3.csv", show_col_types = F) %>% select(Gene_Symbols) %>% unname %>% unlist
+
+keep_genes = intersect(DR_genes, rownames(orpheus_inputs[["0"]][["pseudobulk_tmm_matrix"]]))
+
+
+#Try removing the small seq batch from the pb and variance 
+rm_subs = subject_meta$individualID[which(subject_meta$batch_bin == "[4,10)")]
+
+
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+# This ensures stopCluster runs even if the code below crashes!
+on.exit(stopCluster(cl))
+
+cluster_phis = list()
+for(cell_type in names(orpheus_inputs)){
+  
+print(paste("Analyzing condition", cell_type))
+
+
+tmp = orpheus_inputs[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+counts = tmp[[3]]
+
+rm_me_subs = which(colnames(pb_mat) %in% rm_subs)
+print(paste0("Length of rm_me_subs: ", length(rm_me_subs)))
+pb_mat = pb_mat[, -rm_me_subs]
+var_mat = var_mat[, -rm_me_subs]
+stopifnot(all.equal(colnames(pb_mat), colnames(var_mat)))
+
+#Variance of NB is var = mean + mean^2*theta
+#rearrange to solve for theta = (var-mean)/mean^2
+time_wise_theta_meas <- as.data.frame(mapply(function(v,m){(v-m)/m^2}, var_mat, pb_mat))
+rownames(time_wise_theta_meas) = rownames(pb_mat)
+colnames(time_wise_theta_meas) = paste0(colnames(time_wise_theta_meas), "_theta_meas")
+
+vars = sparseMatrixStats::rowVars(counts)
+means = sparseMatrixStats::rowMeans2(counts)
+agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+rownames(agg_theta_meas) = rownames(pb_mat)
+
+
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+# stopifnot(all.equal(times, meta_data$times))
+pb_mat_keep = pb_mat[keep_genes, ]
+var_mat_keep = var_mat[keep_genes, ]
+
+stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+
+
+pb_cycling_custom = is_cycling_custom(times, pb_mat_keep, meta_data, time_units = "rads")
+
+stopifnot(all(pb_cycling_custom$Gene_Symbols == rownames(var_mat_keep)))
+pb_phases_cust = as.numeric(pb_cycling_custom$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+bulk_thr_cutoff = 0.5
+
+input_cos_cust = var_cyclers_cust %>% 
+    left_join(pb_cycling_custom, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    #mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    mutate(sig_24_12_in_cond_alone = ifelse((BHQ_pb < 0.1 & amp_ratio >= 0.2 & amplitude_bulk >= bulk_thr_cutoff & partial_model_AIC_var > full_model_AIC_var), 1, 0))
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+phi_results_exc35DR_rhythms_tested <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+save(phi_results_exc35DR_rhythms_tested, file = "~/Desktop/phis_exc35_CTLvAD_tested_exc35DRgenes.RData")
+
+```
+
+#### Plotting
+
+Ac_compare_hist
+
+```{r}
+load("figures/rosmap_exc35/ORPHEUS_on_Exc35DR_genes//phis_exc35_CTLvAD_tested_exc35DRgenes.RData")
+cos_phis_filt = filter(phi_results_exc35DR_rhythms_tested, !is.na(phi))
+
+
+# Perform the Wilcoxon Rank Sum test
+wilcox_result <- wilcox.test(phi ~ Source, data = cos_phis_filt)
+print(wilcox_result)
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+
+# Define a colorpallete
+color_palette <- c("0" = "skyblue", "1" = "salmon")
+
+# Create the plot
+p <- ggplot(cos_phis_filt, aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7.5, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "Phase Dispersion is Increased in AD Neurons",
+    y = "Phase Dispersion (hrs)",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+    scale_y_continuous(breaks = c(0,2,4,6,8))+
+  ylim(c(0,8))
+
+median_df <- cos_phis_filt %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_phi = median(phi, na.rm = TRUE)*12/pi)
+
+p <- p+geom_text(
+  data = median_df,
+  aes(x = Source, y = median_phi, label = round(median_phi, 2)),
+  vjust = 1.5,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+# Display the plot
+print(p)
+ggsave("~/Desktop/phi_boxplot_NOTmatched_exc35DRgenes.pdf",p, device = "pdf", width = 5, height = 5 )
+
+####### Log Ac not paired #######
+p2 <- ggplot(cos_phis_filt, aes(x = Source, y = log(Ac), fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = log(Ac)), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 3, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = "Log cellular amp. (Ac)",
+    y = "Log cellular amp. (Ac)",
+    x = "Condition"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+    scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))+
+  ylim(c(-3,5))
+
+median_df <- cos_phis_filt %>%
+  dplyr::group_by(Source) %>%
+  dplyr::summarise(median_log_ac= median(log(Ac), na.rm = TRUE))
+
+p2 <- p2+geom_text(
+  data = median_df,
+  aes(x = Source, y = median_log_ac, label = round(median_log_ac, 2)),
+  vjust = 1.5,
+  hjust = 3,
+  fontface ="bold",
+  size = 3)
+
+# Display the plot
+print(p2)
+ggsave("~/Desktop/Ac_boxplot_NOTmatched_exc35DRgenes.pdf",p2, device = "pdf", width = 5, height = 5 )
+
+############## PAIRWISE BOXPLOT #################
+df_matched <- cos_phis_filt %>%
+  group_by(Row.names) %>%
+  filter(n_distinct(Source) == 2) %>%
+  ungroup()
+
+
+matched_phi_boxplot = ggplot(df_matched, aes(Source, phi*12/pi, fill = Source))+
+ geom_boxplot(outliers = F)+
+  theme_minimal()+
+  xlab("Condition")+
+  ylab("Prediceted phase std. (hrs)")+
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 10, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  ) +
+  scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))
+
+ggsave("~/Desktop/matched_phi_boxplot_exc35DR.pdf",matched_phi_boxplot, device = "pdf", width = 5, height = 5 )
+
+
+matches_Ac_boxplot = ggplot(df_matched, aes(Source, log(Ac), fill = Source))+
+ geom_boxplot(outlier.shape = NA)+
+  theme_minimal()+
+  xlab("Condition")+
+  ylab("Log(cell rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = color_palette) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )+
+  scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))
+
+
+ggsave("~/Desktop/matched_Ac_boxplot_exc35DR.pdf",matches_Ac_boxplot, device = "pdf", width = 5, height = 5 )
+
+matches_pbAmp_boxplot = ggplot(df_matched, aes(Source, log(as.numeric(amplitude_bulk)), fill = Source))+
+ geom_boxplot(outliers  = F)+
+  theme_minimal()+
+  xlab("Condition")+
+  ylab("Log(PB rhythm amp.)")+
+  geom_jitter(width = 0.1, alpha = 0.5) +
+  scale_fill_manual(values = color_palette) +
+  theme(
+    axis.text.x = element_text(size = 14, angle = 45, vjust = 0.6),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+    legend.position = "none"
+  )+
+  scale_x_discrete(labels = c("0" = "CTL", "1" = "AD"))
+
+ggsave("~/Desktop/matched_pbAmp_boxplot.pdf",matches_pbAmp_boxplot, device = "pdf", width = 5, height = 5 )
+
+
+# Scatter plot showing matched phis, as opposed to boxplot:
+# Calculate summary statistics for annotation
+
+comparison <- df_matched %>%
+  group_by(Row.names) %>%
+  summarise(
+    diff = phi[Source == "1"] - phi[Source == "0"]
+  ) %>%
+  mutate(
+    higher_in = case_when(
+      diff > 0 ~ "AD_higher",
+      diff < 0 ~ "CTL_higher",
+      TRUE ~ "equal"
+    ))
+
+num_genes <- nrow(comparison)
+num_increased = table(comparison$higher_in)["AD_higher"]
+percent_increased <- round(100 * num_increased / num_genes, 1)
+
+merged_phi_wilcox_test = wilcox.test(phi ~ Source, data = df_matched, paired = T)
+
+# Create a text label for the plot
+stats_label <- sprintf(
+  "%d/%d genes (%s%%) genes increase phase disp. in AD",
+  num_increased,
+  num_genes,
+  percent_increased
+)
+
+# Find limits for a square plot
+max_val <- max(df_matched$phi*12/pi, na.rm = TRUE) * 1.1
+
+df_matched_wide<- df_matched %>%
+  select(Row.names, phi, Source) %>%
+  pivot_wider(
+    names_from = Source,
+    values_from = phi,
+    names_prefix = "phi_"
+  )
+
+p_scatter <- ggplot(df_matched_wide, aes(x = phi_0*12/pi, y = phi_1*12/pi)) +
+  # The line of identity (y=x). This is the most important reference.
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  # The data points. Use some transparency.
+  geom_point(alpha = 0.4, size = 2.5, color = "grey50") + # Using the AD color from before
+  # Add the statistical annotation
+  # Place it in a corner of the plot
+  annotate(
+    "text", 
+    x = 0, 
+    y = max_val, 
+    label = stats_label, 
+    hjust = 0, 
+    vjust = 1, 
+    size = 3,
+    fontface = "bold"
+  ) +
+  # Force the plot to be square for easy comparison to the y=x line
+  coord_fixed(xlim = c(0, max_val), ylim = c(0, max_val)) +
+  # Labels and theme
+  labs(
+    title = "Systematic Increase in Phase Dispersion in AD Neurons",
+    x = "Phase Dispersion (hrs) in CTL",
+    y = "Phase Dispersion (hrs) in AD"
+  ) +
+  theme_bw()+
+  theme(
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )
+
+print(p_scatter)
+ggsave("~/Desktop/matched_phi_scatter_exc35DR.pdf", plot = p_scatter, device = "pdf", width = 5, height = 5)
+
+#### Histogram of phi differences ###
+
+
+phi_compare_hist = ggplot(df_matched_wide, aes(x = phi_1-phi_0)) +
+  geom_histogram( color = "black", fill = "darkorchid2", alpha = 1) +
+  guides(fill = "none") +    # remove fill legend
+  xlab("Estimated phase std in AD - CTL (hrs)")+
+  ylab("Count")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )
+
+ggsave("~/Desktop/ADminusCTLphaseSTD_exc35DR.pdf", plot = phi_compare_hist, device = "pdf", width = 5, height = 5)
+
+df_matched_wide_Ac<- df_matched %>%
+  select(Row.names, Ac, Source) %>%
+  pivot_wider(
+    names_from = Source,
+    values_from = Ac,
+    names_prefix = "Ac_"
+  )
+
+Ac_compare_hist = ggplot(df_matched_wide_Ac, aes(x = log(Ac_1)-log(Ac_0))) +
+  geom_histogram( color = "black", fill = "darkorchid2", alpha = 1) +
+  guides(fill = "none") +    # remove fill legend
+  xlab("Log cellular amp. AD/CTL")+
+  ylab("Count")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12)    # Increase legend title size
+  )
+
+ggsave("~/Desktop/LogAcADminusLogAcCTL_exc35DR.pdf", plot = Ac_compare_hist, device = "pdf", width = 5, height = 5)
+
+```
+
+### Run ORPHEUS on permuted subject labels
+
+```{r}
+
+library(tidyverse)
+library(ggpubr)
+library(doParallel)
+library(Orpheus)
+
+#Load in the genes with rhythms in CTL or AD, I will test in both groups:
+
+DR_genes = read_csv("~/Box Sync/Henry_stuff/AD_project/scROSMAP/scrosmap_newAtlas/scROSMAP_project/Cyclops_ordering/downstream_output_Exc3_5/enrichR_files/DR_cyclers_CyclingBHQ1AR33_DRBHQ3.csv", show_col_types = F) %>% select(Gene_Symbols) %>% unname %>% unlist
+
+load("exc35_ctl_ad_pb_var_list.RData")
+
+keep_genes = intersect(DR_genes, rownames(orpheus_inputs[["0"]][["pseudobulk_tmm_matrix"]]))
+rm(orpheus_inputs)
+
+#Load in PB_var list
+load("figures/rosmap_exc35/pathway_approach2/rosmap_exc35_condition_AD_vs_CTL_pb_var_matrices_list_randomAssignment_for_null_dist_1000trials_ONESEQBATCH.RData")
+load("figures/rosmap_exc35/subject_meta_cogdx.RData")
+
+cl <- makeCluster(6)
+registerDoParallel(cl)
+
+# This ensures stopCluster runs even if the code below crashes!
+on.exit(stopCluster(cl))
+
+phi_outputs <- vector("list", length(pb_var_list))
+names(phi_outputs) <- paste0("V", seq(1,length(pb_var_list)))
+
+for(i in 1:length(pb_var_list)){
+orpheus_input_i = pb_var_list[[i]]
+
+cluster_phis = list()
+for(cell_type in names(orpheus_input_i)){
+print(paste("Analyzing condition", cell_type))
+tmp = orpheus_input_i[[cell_type]]
+pb_mat = tmp[[1]]
+var_mat = tmp[[2]]
+
+
+meta_data <- subject_meta[match(colnames(pb_mat), subject_meta$individualID), ]
+times = meta_data$times
+# stopifnot(all.equal(times, meta_data$times))
+pb_mat_keep = pb_mat[keep_genes, ]
+var_mat_keep = var_mat[keep_genes, ]
+
+stopifnot(all.equal(rownames(pb_mat_keep), rownames(var_mat_keep)))
+
+pb_cycling = is_cycling_custom(times, pb_mat_keep, meta_data = meta_data, time_units = "rad")
+
+stopifnot(all.equal(pb_cycling$Gene_Symbols , rownames(var_mat_keep)))
+pb_phases_cust = as.numeric(pb_cycling$acrophase_bulk)
+
+var_cyclers_cust = var_cycling_custom_fixed_acro(times, var_mat = var_mat_keep, mean_mat = pb_mat_keep, phase_pb = pb_phases_cust, meta_data = meta_data, time_units = "rads")
+
+
+
+bulk_thr_cutoff = 0.5
+
+input_cos_cust = var_cyclers_cust %>%
+    left_join(pb_cycling, by = "Gene_Symbols", suffix = c("_var", "_pb")) %>%
+    mutate(across(-Gene_Symbols, as.numeric)) %>%
+    # filter(BHQ_pb < 0.1 & amp_ratio >= 0.2) %>%
+    # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+    dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp,amplitude_bulk, mesor_bulk,  everything()) %>%
+    filter(Gene_Symbols %in% keep_genes) %>%
+    column_to_rownames("Gene_Symbols")%>%
+    mutate(sig_24_12_in_cond_alone = ifelse((BHQ_pb < 0.1 & amp_ratio >= 0.2 & amplitude_bulk >= bulk_thr_cutoff & partial_model_AIC_var > full_model_AIC_var), 1, 0))
+    # filter(amplitude_bulk >= bulk_thr_cutoff) %>%
+    # column_to_rownames("Gene_Symbols")%>%
+    # filter(partial_model_AIC_var > full_model_AIC_var)
+
+# Calculate phi parameters
+phi_cust = input_cos_cust %>%
+    apply(., 1, function(row) {
+        suppressWarnings(
+             Orpheus::find_analytic(row[1], row[2], row[3], row[4])
+             )
+    }) %>%
+    t %>%
+    as.data.frame
+colnames(phi_cust) = c("G", "Ac", "theta", "phi")
+
+output_cust = merge(phi_cust, input_cos_cust, by = 0)
+
+local_res =  list("tmm" = output_cust)
+names(local_res) = cell_type
+cluster_phis <- append(cluster_phis, list(local_res))
+}
+
+#Combine 'low' and 'high' groups
+phi_results_i <- do.call(rbind, lapply(seq_along(cluster_phis), function(source_name) {
+  current_df <- cluster_phis[[source_name]][[1]]
+  current_df$Source <- names(cluster_phis[[source_name]][1])
+  current_df
+}))
+
+phi_results_i_filt = filter(phi_results_i, !is.na(as.numeric(phi)) & as.numeric(fund_mean_coeff) > 0)
+
+#----- plotting ------
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+color_palette <- c("0" = "skyblue", "1" = "salmon")
+
+# Create the plot
+p <- phi_results_i_filt %>% mutate(Source = factor(Source, levels = c("0", "1"))) %>%
+  ggplot(aes(x = Source, y = phi*12/pi, fill = Source)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(
+  aes(x = Source, y = phi*12/pi), 
+  alpha = 0.4,
+  position = position_jitter(width = jitter_width, seed = jitter_seed)
+  ) +
+  # Manually set the colors for fill and color aesthetics
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  #Significance bar
+    # stat_compare_means(method = "kruskal.test") +
+
+  stat_compare_means(
+    method = "wilcox.test",         # Specify the statistical test
+    comparisons = list(c("0", "1")), # A list of the pairs to compare
+    label = "p.signif",             # Display significance levels
+    label.y = 7, # Adjust vertical position of the bar
+    tip.length = 0.02 # Length of the small vertical lines
+  ) +
+  # Add labels and a title
+  labs(
+    title = paste0("V", i),
+    y = "Phase Dispersion (hrs)",
+    x = "Pathway stratification"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none", # The x-axis labels are sufficient
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),   # Increase legend title size
+  )+
+  ylim(c(0,8))
+#print(p)
+ggsave(paste0("~/Desktop/rosmap_exc35_null_dist_cogdx/exc35_phi_boxplot_V",i,".pdf"),p, device = "pdf", width = 5, height = 5 )
+
+
+# phi_output_i =  list("tmm" = phi_results_i)
+# names(phi_output_i) = pathway_name
+# phi_outputs <- append(phi_outputs, phi_output_i)
+
+###
+phi_outputs[[i]] <- phi_results_i_filt
+
+#explicitly remove the heavy object
+rm(phi_results_i_filt)
+
+#Force Garbage Collection
+gc()
+
+if(i == 500){
+  save(phi_outputs, file = "~/Desktop/rosmap_exc35_null_dist_cogdx/rosmap_exc35_ctl_vs_ad_phis_500_of_1000_BENCHMARK.RData")
+}
+
+}
+
+all_pathway_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, Source = .y))
+
+
+save(phi_outputs, file = "~/Desktop/rosmap_exc35_null_dist_cogdx/rosmap_exc35_ctl_vs_ad_phis_ONEBATCH.RData")
+save(all_pathway_phis_df, file = "~/Desktop/rosmap_exc35_null_dist_cogdx/rosmap_exc35_ctl_vs_ad_phis_df_ONEBATCH.RData")
+
+stopCluster(cl)
+
+```
+
+#### Calculate significance of AD vs CTL phi difference from empirical dist
+
+```{r}
+load("figures/rosmap_exc35/ORPHEUS_on_Exc35DR_genes/rosmap_exc35_null_dist_cogdx_exc35DR_genes_onebatch/rosmap_exc35_ctl_vs_ad_phis_ONEBATCH.RData")
+
+any(table(names(phi_outputs)) !=1)
+
+null_data_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, perm = .y)) %>%
+  mutate(Source = factor(Source, levels = c("0", "1")))
+
+#Unpaired version:
+null_stats_df <- null_data_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  group_by(perm) %>%
+  summarise(
+    n_0 = sum(Source == "0"),
+    n_1 = sum(Source == "1"),
+    med_0 = median(phi[Source == "0"]),
+    med_1 = median(phi[Source == "1"]),
+    .groups = "drop"
+  ) %>% #mutate(normed_stat = statistic/(n_low*n_high)) %>%
+  mutate(med_diff = med_1 - med_0) %>%
+  mutate(abs_med_diff = abs(med_diff))
+
+cutoffs = quantile(null_stats_df$abs_med_diff, probs = c(0.95, 0.99))
+
+load("figures/rosmap_exc35/ORPHEUS_on_Exc35DR_genes/phis_exc35_CTLvAD_tested_exc35DRgenes.RData")
+
+
+real_data_phis_df <- phi_results_exc35DR_rhythms_tested %>%
+  mutate(Source = factor(Source, levels = c("0", "1")))
+
+#Unpaired version:
+real_data_stats_df <- real_data_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  summarise(
+    n_0 = sum(Source == "0"),
+    n_1 = sum(Source == "1"),
+    med_0 = median(phi[Source == "0"]),
+    med_1 = median(phi[Source == "1"]),
+  ) %>% #mutate(normed_stat = statistic/(n_low*n_high)) %>%
+  mutate(med_diff = med_1 - med_0) %>%
+  mutate(abs_med_diff = abs(med_diff)) %>%
+  mutate(sig_05 = ifelse(abs_med_diff > cutoffs[1], T, F)) %>%
+  mutate(sig_01 = ifelse(abs_med_diff > cutoffs[2], T, F)) 
+
+p_empirical <- function(x, null_vec) {
+  (sum(null_vec >= x) + 1) / (length(null_vec) + 1)
+}
+real_data_stats_df$p_value <- sapply(real_data_stats_df$abs_med_diff, p_empirical, null_vec = null_stats_df$abs_med_diff)
+
+```
+
+Paired version, with fraction increase as test stat:
+
+```{r}
+load("figures/rosmap_exc35/ORPHEUS_on_Exc35DR_genes/rosmap_exc35_null_dist_cogdx_exc35DR_genes_onebatch/rosmap_exc35_ctl_vs_ad_phis_ONEBATCH.RData")
+
+
+any(table(names(phi_outputs)) !=1)
+
+null_data_phis_df <- imap_dfr(phi_outputs, ~ mutate(.x, perm = .y)) %>%
+  mutate(Source = factor(Source, levels = c("0", "1")))
+
+#paired version:
+df_matched_null <- null_data_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  group_by(perm, Row.names) %>%
+  filter(n_distinct(Source) == 2) %>%  # keep only matched Row.names
+  ungroup()
+
+null_stats_df <-  df_matched_null %>%
+  group_by(perm, Row.names) %>%
+  summarise(
+    phi_1 = phi[Source == 1],
+    phi_0 = phi[Source == 0],
+    .groups = "drop"
+  )  %>%
+  group_by(perm) %>%
+  summarise(
+    fraction_higher = mean(phi_1 > phi_0),
+    num_pairs = n(),
+    .groups = "drop"
+  )
+
+cutoffs = quantile(null_stats_df$fraction_higher, probs = c(0.95, 0.99))
+
+load("figures/rosmap_exc35/ORPHEUS_on_Exc35DR_genes/phis_exc35_CTLvAD_tested_exc35DRgenes.RData")
+
+real_data_phis_df <- phi_results_exc35DR_rhythms_tested %>%
+  mutate(Source = factor(Source, levels = c("0", "1")))
+
+#paired version:
+df_matched_real <- real_data_phis_df %>%
+  filter(!is.na(phi) & fund_mean_coeff > 0) %>%
+  group_by(Row.names) %>%
+  filter(n_distinct(Source) == 2) %>%  # keep only matched Row.names
+  ungroup()
+
+real_data_stats_df <- df_matched_real %>%
+    group_by(Row.names) %>%
+  summarise(
+    phi_1 = phi[Source == 1],
+    phi_0 = phi[Source == 0],
+    .groups = "drop"
+  )  %>%
+  summarise(
+    fraction_higher = mean(phi_1 > phi_0),
+    num_pairs = n(),
+    .groups = "drop"
+  )%>%
+  mutate(sig_05 = ifelse(fraction_higher > cutoffs[1], T, F)) %>%
+  mutate(sig_01 = ifelse(fraction_higher > cutoffs[2], T, F))
+
+p_empirical <- function(x, null_vec) {
+  (sum(null_vec >= x) + 1) / (length(null_vec) + 1)
+}
+real_data_stats_df$p_value <- sapply(real_data_stats_df$fraction_higher, p_empirical, null_vec = null_stats_df$fraction_higher)
+```
+
+### Write out RNK files for all genes given to ORPHEUS:
 
 ```{r}
 
@@ -1364,8 +2194,6 @@ file = c("../examples/exc35_ctl_ad_combined.h5Seurat")
 seurat_obj = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, neighbors = F, images = F)
 
 s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA" )
-
-# s_obj_ad <- subset(s_obj, cond_cogdx == 1)
 
 orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = unique(s_obj$ceradsc_bin), grouping_var = "ceradsc_bin")
 
@@ -1595,8 +2423,6 @@ seurat_obj = LoadH5Seurat(file,assays = c("RNA"), reductions = F, graphs = F, ne
 
 s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj, assay = "RNA" )
 
-# s_obj_ad <- subset(s_obj, cond_cogdx == 1)
-#rm(s_obj)
 
 #Bin braaksc into two groups:
 s_obj@meta.data =s_obj@meta.data%>%  mutate(
@@ -1865,13 +2691,13 @@ library(circular)
 # y <- calcNormFactors(y, method = "TMM")
 # # Get log-transformed Counts Per Million (logCPM)
 # logcpm_pseudobulk <- cpm(y, log = T)
-# save(logcpm_pseudobulk, file ="../../figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
+# save(logcpm_pseudobulk, file ="figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
 ```
 
 #### load normed counts for gsva, calculated above:
 
 ```{r}
-load("../../figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
+load("figures/rosmap_exc35/exc35_logcpm_pseudobulk_for_gsva.RData")
 ```
 
 #### Get pathways for gsva
