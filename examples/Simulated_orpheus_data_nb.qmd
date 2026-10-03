@@ -11,6 +11,7 @@ library(Seurat)
 library(dplyr)
 library(Orpheus)
 library(tidyverse)
+library(sparseMatrixStats)
 ```
 
 ### Define simulation function

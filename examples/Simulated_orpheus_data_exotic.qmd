@@ -1,0 +1,754 @@
+---
+title: "Simulated_orpheus_data_exotic"
+format: html
+editor: visual
+---
+
+### Load libs
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(Orpheus)
+library(tidyverse)
+library(sparseMatrixStats)
+```
+
+### Define waveform and theory helpers
+
+Cell rhythms are short harmonic sums w(t) = sum_k b_k cos(k t - psi_k) using odd harmonics only, so w(t - pi) = -w(t). Waves are normalized so (max - min)/2 = 1, which means A_true is still half the peak-to-trough distance. The fundamental (not the peak) is aligned to t = 0.
+
+```{r}
+eval_wave <- function(t, wave) {
+  out <- 0
+  for (h in seq_along(wave$k)) {
+    out <- out + wave$b[h] * cos(wave$k[h] * t - wave$psi[h])
+  }
+  out
+}
+
+make_wave <- function(waveform = "cosine", n_harmonics = 3, custom_wave = NULL) {
+  if (!is.null(custom_wave)) {
+    wave <- custom_wave
+    waveform <- "custom"
+  } else {
+    k_odd <- c(1, 3, 5)[seq_len(n_harmonics)]
+    wave <- switch(waveform,
+      cosine   = list(k = 1, b = 1, psi = 0),
+      square   = list(k = k_odd, b = (-1)^(seq_along(k_odd) - 1) / k_odd, psi = rep(0, length(k_odd))),
+      triangle = list(k = k_odd, b = 1 / k_odd^2, psi = rep(0, length(k_odd))),
+      # cosine2: cos(t) + 0.5*cos(3t - pi/2), i.e. the per2 = per/3, pha2 = pha1 + per2/4 wave in radians
+      cosine2  = list(k = c(1, 3), b = c(1, 0.5), psi = c(0, pi/2)),
+      stop("Unknown waveform: ", waveform)
+    )
+  }
+  # Normalize so half of peak-to-trough = 1 (cosine stays exactly b = 1)
+  grid <- seq(0, 2*pi, length.out = 4001)
+  w <- eval_wave(grid, wave)
+  wave$b <- wave$b / ((max(w) - min(w)) / 2)
+  wave$name <- waveform
+  wave
+}
+
+# Exact mean and variance of counts at times t for a gene with cell rhythm
+# lambda = G + A*w(t + phase_noise - shift) + epsilon, phase_noise ~ N(0, phi_sd^2),
+# and counts | lambda with Var = lambda + theta*lambda^2 (theta = 0 is Poisson).
+theoretical_moments <- function(t, G, A, theta, phi_sd, epsilon_sd, wave, shift = 0) {
+  k <- wave$k
+  b <- wave$b
+  psi <- wave$psi + k * shift
+  rho <- function(nu) exp(-nu^2 * phi_sd^2 / 2)
+
+  osc_mean <- eval_wave(t, list(k = k, b = b * rho(k), psi = psi))
+  mu <- G + A * osc_mean
+
+  # E[w(t + noise)^2]
+  osc_sq <- 0
+  for (j in seq_along(k)) {
+    for (l in seq_along(k)) {
+      osc_sq <- osc_sq + b[j] * b[l] / 2 *
+        (rho(k[j] - k[l]) * cos((k[j] - k[l]) * t - psi[j] + psi[l]) +
+         rho(k[j] + k[l]) * cos((k[j] + k[l]) * t - psi[j] - psi[l]))
+    }
+  }
+  E_lambda2 <- G^2 + epsilon_sd^2 + 2 * G * A * osc_mean + A^2 * osc_sq
+  V <- mu + (1 + theta) * E_lambda2 - mu^2
+  list(mu = mu, V = V)
+}
+
+# Continuous Fourier truth, using the same conventions as is_cycling() / var_cycling_fix_acro():
+# V_w is the variance fundamental in phase with the bulk, V_2w is the coefficient on
+# cos(2(t - pi/2 - phase_bulk)) and V_2w_quad is the out-of-phase 12h part.
+theoretical_fourier <- function(G, A, theta, phi_sd, epsilon_sd, wave, shift = 0) {
+  t <- seq(0, 2*pi, length.out = 257)[-257]
+  mom <- theoretical_moments(t, G, A, theta, phi_sd, epsilon_sd, wave, shift)
+  proj <- function(x, f) 2 * mean(x * f)
+  phase_bulk <- atan2(proj(mom$mu, sin(t)), proj(mom$mu, cos(t)))
+  beta <- pi + 2 * phase_bulk
+  c2 <- proj(mom$V, cos(2*t))
+  s2 <- proj(mom$V, sin(2*t))
+  c(S_amp = sqrt(proj(mom$mu, cos(t))^2 + proj(mom$mu, sin(t))^2),
+    V_DC = mean(mom$V),
+    V_w = proj(mom$V, cos(t - phase_bulk)),
+    V_2w = c2 * cos(beta) + s2 * sin(beta),
+    V_2w_quad = -c2 * sin(beta) + s2 * cos(beta))
+}
+
+# Phi that the Orpheus pipeline converges to with infinitely many cells: run the
+# is_cycling / var_cycling_fix_acro / find_analytic steps on noise-free mean and variance
+# at the sampled time points.
+oracle_phi <- function(time_points, G, A, theta, phi_sd, epsilon_sd, wave, shift = 0) {
+  mom <- theoretical_moments(time_points, G, A, theta, phi_sd, epsilon_sd, wave, shift)
+  mu <- mom$mu
+  V <- mom$V
+  cf <- coef(lm(mu ~ sin(time_points) + cos(time_points)))
+  S_DC <- cf[[1]]
+  S_amp <- sqrt(cf[[2]]^2 + cf[[3]]^2)
+  phase_bulk <- atan2(cf[[2]], cf[[3]]) %% (2*pi)
+  double_wave <- cos(2 * (time_points - pi/2 - phase_bulk))
+  full_model <- lm(V ~ double_wave + mu)
+  fitted_fund <- full_model$coefficients[["mu"]] * mu
+  fund_amp <- coef(lm(fitted_fund ~ cos(time_points - phase_bulk)))[[2]]
+  suppressWarnings(find_analytic(full_model$coefficients[["double_wave"]], fund_amp, S_amp, S_DC)[4])
+}
+
+# Count draws. ZINB: NB counts with a gene-wise structural-zero probability pi0.
+draw_counts <- function(mu, theta, dist, pi0 = 0) {
+  switch(dist,
+    nb      = rnbinom(length(mu), size = 1/theta, mu = mu),
+    poisson = rpois(length(mu), mu),
+    zinb    = {
+      x <- rnbinom(length(mu), size = 1/theta, mu = mu)
+      x[runif(length(mu)) < pi0] <- 0L
+      x
+    },
+    stop("Unknown dist: ", dist)
+  )
+}
+```
+
+### Define simulation function
+
+```{r}
+simulate_scRNAseq_circadian <- function(n = 10000, m = 5000, p_circ = 0.3,n_time_points = 6,
+                                        phi_sd = 0.3, amp_ratio_range = c(.3, 0.75), G_range = c(0.05, 5), epsilon_sd = 0.,
+                                        theta_range = c(0.01,2.5), seed = 123,
+                                        waveform = "cosine", n_harmonics = 3, custom_wave = NULL,
+                                        dist = c("nb", "poisson", "zinb"), zi_prob_range = c(0.05, 0.3)) {
+  dist <- match.arg(dist)
+  wave <- make_wave(waveform, n_harmonics, custom_wave)
+  set.seed(seed)
+  
+  # Time points
+  time_points <- seq(0, 2*pi, length.out = n_time_points) # Discrete time points for sampling
+  cell_time_indices <- sort(sample(1:n_time_points, n, replace = TRUE))
+  t_vals <- time_points[cell_time_indices] # Actual time for each cell
+  
+  # Assign circadian vs non-circadian genes
+  n_circ <- round(p_circ * m)
+  stopifnot(n_circ <= m)
+  circadian_gene_indices <- 1:n_circ # Row indices for circadian genes
+  
+  # Initialize expression matrix
+  expr_matrix <- matrix(0, nrow = m, ncol = n)
+  gene_names <- paste0("Gene", 1:m)
+  rownames(expr_matrix) <- gene_names
+  colnames(expr_matrix) <- paste0("Cell", 1:n)
+  
+  # Initialize data frame to store gene parameters
+  gene_parameters <- data.frame(
+    gene_id = gene_names,
+    theta_true = 0,
+    A_true = 0, # Amplitude, will be 0 for non-circadian
+    G_true = 0, # Baseline expression
+    V_w_theoret = 0,
+    V_2w_theoret = 0,
+    V_DC_theoret = 0,
+    S_amp_theoret = 0,
+    V_2w_quad_theoret = 0,
+    phi_oracle = NA_real_,
+    pi0_true = 0, # Zero-inflation probability (ZINB only)
+    theta_eff = 0, # Dispersion seen by Orpheus: (theta + pi0)/(1 - pi0)
+    waveform = wave$name,
+    dist = dist,
+    is_circadian = FALSE,
+    stringsAsFactors = FALSE
+  )
+
+  rownames(gene_parameters) <- gene_names
+  
+  
+  # Simulate circadian genes
+  if (n_circ > 0) {
+    for (i in 1:n_circ) {
+      gene_idx <- circadian_gene_indices[i] # Actual row index in expr_matrix
+      
+      #Select amp ratio
+      Amp_ratio_val <- runif(1, amp_ratio_range[1], amp_ratio_range[2])
+      #Select MESOR
+      G_val <- runif(1, G_range[1], G_range[2])
+      A_val <- Amp_ratio_val * G_val
+      stopifnot(A_val <= G_val) # Ensure baseline is at least amplitude (should be)
+      theta <- if (dist == "poisson") 0 else runif(1, theta_range[1], theta_range[2])
+      pi0 <- if (dist == "zinb") runif(1, zi_prob_range[1], zi_prob_range[2]) else 0
+
+      # Odd genes have their fundamental peak at t=0, even genes at t=pi
+      shift <- if (gene_idx %% 2) 0 else pi
+
+      # ZINB with constant pi0 is NB in the observed mean m = (1-pi0)*lambda, with
+      # theta_eff = (theta + pi0)/(1 - pi0). Poisson is theta = 0. So one formula covers all three.
+      theta_eff <- (theta + pi0) / (1 - pi0)
+      G_eff <- (1 - pi0) * G_val
+      A_eff <- (1 - pi0) * A_val
+      eps_eff <- (1 - pi0) * epsilon_sd
+      theo <- theoretical_fourier(G_eff, A_eff, theta_eff, phi_sd, eps_eff, wave, shift)
+
+
+      # Store parameters
+      gene_parameters[gene_idx, "A_true"] <- A_val
+      gene_parameters[gene_idx, "G_true"] <- G_val
+      gene_parameters[gene_idx, "theta_true"] <- theta
+      gene_parameters[gene_idx, "pi0_true"] <- pi0
+      gene_parameters[gene_idx, "theta_eff"] <- theta_eff
+      gene_parameters[gene_idx, "is_circadian"] <- TRUE
+      gene_parameters[gene_idx, "V_w_theoret"] <- theo[["V_w"]]
+      gene_parameters[gene_idx, "V_2w_theoret"] <- theo[["V_2w"]]
+      gene_parameters[gene_idx, "V_2w_quad_theoret"] <- theo[["V_2w_quad"]]
+      gene_parameters[gene_idx, "V_DC_theoret"] <- theo[["V_DC"]]
+      gene_parameters[gene_idx, "S_amp_theoret"] <- theo[["S_amp"]]
+      gene_parameters[gene_idx, "phi_oracle"] <- oracle_phi(time_points, G_eff, A_eff, theta_eff, phi_sd,
+                                                            eps_eff, wave, shift)
+
+
+      phases_w_noise <- t_vals + rnorm(n, 0, phi_sd) # Cell-specific phase noise
+      cell_specific_epsilon_noise <- rnorm(n, 0, epsilon_sd) # Cell-specific expression noise
+      # repeat_nums <- table(t_vals)
+      # cell_specific_epsilon_noise <- rep(rnorm(n_time_points, 0, epsilon_sd), times = repeat_nums)
+
+      lambdas <- A_val * eval_wave(phases_w_noise - shift, wave) + G_val + cell_specific_epsilon_noise
+
+      # Ensure lambdas are non-negative (rpois requires lambda >= 0)
+      non_negative_lambdas <- pmax(0, lambdas)
+
+
+      # For NB, mu is the mean. Size controls dispersion.
+      # var = mu + mu^2/size. If size=1, var = mu + mu^2. For large mu, var ~ mu^2.
+      counts <- draw_counts(non_negative_lambdas, theta, dist, pi0)
+
+      
+      expr_matrix[gene_idx, ] <- counts
+    }
+  }
+  
+  # Simulate non-circadian genes
+  non_circadian_gene_indices <- setdiff(1:m, circadian_gene_indices)
+  if (length(non_circadian_gene_indices) > 0) {
+    for (gene_idx in non_circadian_gene_indices) {
+      G_val <- runif(1, G_range[1], G_range[2])
+      theta <- if (dist == "poisson") 0 else runif(1, theta_range[1], theta_range[2])
+      pi0 <- if (dist == "zinb") runif(1, zi_prob_range[1], zi_prob_range[2]) else 0
+
+      # Store parameters (A is already 0, is_circadian is already FALSE)
+      gene_parameters[gene_idx, "G_true"] <- G_val
+      gene_parameters[gene_idx, "theta_true"] <- theta
+      gene_parameters[gene_idx, "pi0_true"] <- pi0
+      gene_parameters[gene_idx, "theta_eff"] <- (theta + pi0) / (1 - pi0)
+      
+      
+      cell_specific_epsilon_noise <- rnorm(n, 0, epsilon_sd)
+      # repeat_nums <- table(t_vals)
+      # cell_specific_epsilon_noise <- rep(rnorm(n_time_points, 0, epsilon_sd), times = repeat_nums)
+      mus <- G_val + cell_specific_epsilon_noise
+      
+      non_negative_mus <- pmax(0, mus)
+      counts <- draw_counts(non_negative_mus, theta, dist, pi0)
+
+      
+      expr_matrix[gene_idx, ] <- counts
+    }
+  }
+  
+  # Metadata for cells
+  cell_metadata <- data.frame(
+    cell_id = colnames(expr_matrix),
+    time_point = t_vals # The "true" sampled time for each cell
+  )
+  
+  # Identify which gene names are circadian (can be derived from gene_parameters too)
+  circadian_gene_names <- gene_parameters$gene_id[gene_parameters$is_circadian]
+  
+  return(list(
+    counts = expr_matrix, 
+    cell_metadata = cell_metadata, 
+    gene_parameters = gene_parameters,
+    circadian_gene_ids = circadian_gene_names, # More informative than just indices
+    wave = wave # Normalized harmonic coefficients used for the cell rhythms
+  ))
+}
+
+```
+
+### Waveforms tested
+
+Normalized cell rhythms (solid) and the bulk mean they produce after 3 hrs of phase dispersion (dashed).
+
+```{r}
+wave_names = c("cosine", "square", "triangle", "cosine2")
+wave_df = lapply(wave_names, function(wf) {
+  wave = make_wave(wf)
+  t = seq(0, 2*2*pi, length.out = 400) #two wavelengths
+  data.frame(waveform = wf, ZT = t*12/pi,
+             cell = eval_wave(t, wave),
+             bulk = theoretical_moments(t, G = 0, A = 1, theta = 0, phi_sd = 3/12*pi, epsilon_sd = 0, wave = wave)$mu)
+}) %>% bind_rows() %>%
+  mutate(waveform = factor(waveform, levels = wave_names))
+
+waveform_plot = ggplot(wave_df, aes(x = ZT)) +
+  geom_line(aes(y = cell)) +
+  #geom_line(aes(y = bulk), linetype = "dashed") +
+  facet_wrap(~waveform, nrow = 2) +
+  scale_x_continuous(breaks = seq(0, 48, by = 6)) +
+  xlab("ZT (hrs)") +
+  ylab("Normalized expression") +
+  theme_bw() +
+  theme(strip.background = element_blank(), strip.text = element_text(color = "black", size = 12))
+waveform_plot
+ggsave("~/Desktop/Simulated_waveforms_2x2.pdf", plot = waveform_plot, width = 10, height = 10, units = "in")
+```
+
+Settings to sweep: every waveform with NB counts, plus the cosine with Poisson and ZINB counts.
+
+```{r}
+sim_settings = bind_rows(
+  data.frame(waveform = wave_names, dist = "nb"),
+  data.frame(waveform = "cosine", dist = c("poisson", "zinb"))
+)
+sim_settings
+```
+
+### Simulate realistic data (params from hepatocytes in liver data)
+
+```{r}
+output = list()
+for(s in seq_len(nrow(sim_settings))){
+  wf = sim_settings$waveform[s]
+  dist = sim_settings$dist[s]
+  # for(i in seq(0, 4.5, by = 0.5)){
+  for(i in seq(0, 7, by = 0.5)){
+    print(paste0(wf, ", ", dist, ", phi = ", i))
+    phi_sd = i/12*pi
+    epsilon_sd = 0.3
+    #These were numbers based on hepatocytes 2
+    # sim <- simulate_scRNAseq_circadian(n = 5000, m = 10000, p_circ = .25, phi_sd = phi_sd, n_time_points = 6,
+    #               amp_ratio_range = c(.2, 0.6), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1,2.0))
+    #These are numbers based on hepatocytes 1
+    sim <- simulate_scRNAseq_circadian(n = 8000, m = 10000, p_circ = .1, phi_sd = phi_sd, n_time_points = 6,
+                  amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1, 1.2),
+                  waveform = wf, dist = dist)
+
+    counts <- sim$counts
+    metadata <- sim$cell_metadata
+    gene_info <- sim$gene_parameters
+
+    seurat_obj <- CreateSeuratObject(counts = counts, meta.data = metadata)
+    seurat_obj$orig.ident = seurat_obj$time_point
+    seurat_obj$seurat_clusters = "0"
+
+    s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj)
+    orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = "0", grouping_var = "seurat_clusters")
+
+    tmp = orpheus_inputs[[1]]
+    pb_mat = tmp[[1]]
+    var_mat = tmp[[2]]
+    counts = tmp[[3]]
+
+    #Variance of NB is var = mean + mean^2*theta
+    #rearrange to solve for theta = (var-mean)/mean^2
+    #(for ZINB this measures theta_eff = (theta + pi0)/(1 - pi0); for Poisson it should be ~0)
+    vars = sparseMatrixStats::rowVars(counts)
+    means = sparseMatrixStats::rowMeans2(counts)
+    agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+    rownames(agg_theta_meas) = rownames(pb_mat)
+
+    # summary(agg_theta_meas$coarse_theta)
+    #
+    # summary(means)
+
+    ZT = as.numeric(colnames(pb_mat) )
+
+    pb_cycling = is_cycling(ZT, pb_mat, time_units = "rad")
+    circ_genes = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
+    circ_genes_phases = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(acrophase_bulk)  %>% unname %>% unlist %>% as.numeric
+
+    # length(circ_genes)
+    # pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(amp_ratio) %>% unname %>% unlist %>% as.numeric %>% summary
+
+    var_cyclers = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
+
+    phi = calc_phi( pb_cycling, var_cyclers, bulk_amp_thr = 0 )
+    
+    input = var_cyclers %>% 
+      left_join(pb_cycling, by = "Gene_Symbols", suffix= c("_var", "_pb")) %>%
+      mutate(across(-Gene_Symbols, as.numeric)) %>%
+      filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
+      # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+      # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+      # filter(keep_acrodiff == TRUE) %>%
+      dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, everything()) %>%
+      column_to_rownames("Gene_Symbols")%>%
+      # filter( amplitude_bulk >= 0.5) %>%
+      # select(c(1:5)) %>%
+      filter(partial_model_AIC_var > full_model_AIC_var)
+    
+    plot_df = merge(input, phi, by = 0) %>%
+      merge(., gene_info, by.x="Row.names", by.y = 0)%>%
+      mutate(phase_error = (phi -phi_sd ))
+    plot_df$phi_true = phi_sd
+    # out = merge(plot_df, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
+    out = merge(plot_df, agg_theta_meas, by.x = "Row.names", by.y = 0)
+    
+    output <- append(output, list(out))
+  }
+}
+
+
+#convert list into dataframe (waveform and dist columns come from gene_parameters)
+df = do.call(rbind, output)
+save(df, file = "~/Desktop/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD_exotic.RData")
+
+```
+
+Load data from above if already saved:
+
+```{r}
+load("~/Desktop/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD_exotic.RData")
+
+```
+
+#### Plotting:
+
+```{r}
+#Keep rows of results where bulk amp > thresh & not NaN
+df_filt = dplyr::filter(df, !is.na(phi) & amplitude_bulk >= 0.5 & phi_true*12/pi <= 5)
+setting_levels = paste(sim_settings$waveform, sim_settings$dist, sep = ", ")
+df_filt$setting = factor(paste(df_filt$waveform, df_filt$dist, sep = ", "), levels = setting_levels)
+
+#Plot: Phi sd pred acc vs true phi sd
+df_filt$phi_true_factor = as.factor(df_filt$phi_true*12/pi)
+
+#Median oracle phi (infinite-cell limit of the estimator) per setting and true phi
+oracle_df = df_filt %>%
+  group_by(setting, phi_true) %>%
+  summarise(phi_oracle = median(phi_oracle, na.rm = TRUE), .groups = "drop")
+
+phi_acc_plot = ggplot(df_filt, aes(x = phi_true*12/pi,y =  phi*12/pi))+
+  # geom_boxplot(aes(group = phi_true_factor), outlier.size = 0.5, outlier.alpha = 0.2)+
+  geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+
+  # geom_jitter(width = 0.1, alpha = 0.5) +
+  # geom_violin(aes(group = phi_true_factor)) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  #geom_line(data = oracle_df, aes(y = phi_oracle*12/pi), color = "black") +
+  facet_wrap(~setting, nrow = 2) +
+  # stat_summary(fun = median, geom = "point", size = 2.5, color = "skyblue")+
+  ggtitle("n=5000,m=10000,p_circ=.3,phi_sd=phi_sd,n_time_points=6,\namp_ratio_range=c(.3,0.75),G_range=c(.05,5),epsilon_sd=0.3,theta_range=c(0.01,2.5)")+
+  xlab("True phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 9))+
+  guides(fill = "none")    # remove fill legend
+
+ggsave("~/Desktop/Simulated_phi_acc_exotic_simplified.pdf", plot = phi_acc_plot, width = 12, height = 8, units = "in")  
+
+
+#Hex plots, power and FPR below use the original setting (cosine, NB) only
+df_no_nan = filter(df, !is.nan(phi) & waveform == "cosine" & dist == "nb")
+
+bulk_amp_vs_phase_err = ggplot(df_no_nan, aes(x = amplitude_bulk, y = abs(phase_error*12/pi), z = phi_true*12/pi)) +
+  stat_summary_hex(bins = 30,
+                   fun = mean) + # Color bins by the MEAN true_phase_std inside them
+  scale_fill_distiller(palette = "Spectral", name = "Mean true phase\ndispersion (hrs)\nwithin bin") +
+  geom_smooth(method = "loess", color = "black", linetype = "dashed", se = FALSE) +
+  labs(
+    title = "High Estimation Error is Driven by Low Amplitude and High True Dispersion",
+    x = "Bulk amplitude (measured)",
+    y = "Abs. error of phase dispersion (hrs)"
+  ) +
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+    coord_fixed(ratio = .5)
+
+ggsave("~/Desktop/bulk_amp_vs_phase_err.pdf", plot = bulk_amp_vs_phase_err, width = 7,height = 7, units = "in")  
+
+
+bulk_amp_vs_phase_err2 = ggplot(df_no_nan, aes(x = amplitude_bulk, y = abs(phase_error*12/pi))) +
+  geom_hex(bins = 30 ) + 
+  scale_fill_viridis_c(name = "Gene\ncount") +
+  geom_smooth(method = "loess", color = "red", linetype = "dashed", se = FALSE) +
+  labs(
+    title = "High Estimation Error is Driven by Low Amplitude and High True Dispersion",
+    x = "Bulk amplitude (measured)",
+    y = "Abs. error of phase dispersion (hrs)"
+  ) +
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+    coord_fixed(ratio = .5)
+
+ggsave("~/Desktop/bulk_amp_vs_phase_err_count.pdf", plot = bulk_amp_vs_phase_err2, width = 5,height = 5, units = "in")  
+
+
+# custom_labels <- setNames(paste0("Phi SD. = ", unique(round(df_filt$phi_true*12/pi, 2)) ), unique(df_filt$phi_true))
+# plot_acrodiff = filter(df_filt, phi_true_factor %in% c(0,1,2,3,4))
+# 
+# acrodiff_compare = ggplot(plot_acrodiff, aes(x = acrodiff*12/pi, fill = phi_true*12/pi)) +
+#   geom_histogram(binwidth = 2, color = "black", breaks = seq(0, 12, by = 2)) +
+#   facet_wrap(~ as.factor(phi_true), scales = "free_y", labeller = as_labeller(custom_labels), nrow = 1) +
+#   scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+#   xlab("Fundamental vs 2nd harmonic of variance\n absolute acrophase diff. (hrs)")+
+#   ylab("Count")+
+#   # ggtitle("n=5000,m=10000,p_circ=.2,n_time_points = 12,\nA_range=c(.1, 5),G_range = c(.1, 5),epsilon_sd = 2.0,\ntheta_range=c(0.1,1)")+
+#   theme_bw()+
+#     theme(
+#     strip.background = element_blank(),
+#     strip.text = element_text(color = "black", size = 12),
+#     axis.text.x = element_text(size = 14),    # Increase x-axis text size
+#     axis.text.y = element_text(size = 14),    # Increase y-axis text size
+#     axis.title.x = element_text(size = 16),   # Increase x-axis title size
+#     axis.title.y = element_text(size = 16),   # Increase y-axis title size
+#     legend.title = element_text(size = 12)    # Increase legend title size
+#   )+
+#    # Use scale_x_continuous for precise control over the x-axis
+#   scale_x_continuous(
+#     limits = c(0, 12), 
+#     breaks = seq(0, 12, by = 4), 
+#     expand = c(0, 0)
+#   )+guides(fill = "none")
+# ggsave("~/Desktop/acrodiff_compare.pdf", plot = acrodiff_compare, width = 10, height = 4, units = "in")
+
+```
+
+#### Plotting by group: count distributions (cosine) and waveforms (NB)
+
+```{r}
+#Same style as the plot above, for a subset of settings in one row
+plot_phi_acc_subset = function(plot_data, settings_to_plot) {
+  plot_data = plot_data %>%
+    filter(setting %in% settings_to_plot) %>%
+    mutate(setting = factor(setting, levels = settings_to_plot))
+
+  ggplot(plot_data, aes(x = phi_true*12/pi, y = phi*12/pi))+
+    geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    facet_wrap(~setting, nrow = 1) +
+    xlab("True phase std. (hrs)")+
+    ylab("Predicted phase std. (hrs)")+
+    theme_bw()+
+    theme(
+      strip.background = element_blank(),
+      strip.text = element_text(color = "black", size = 12),
+      axis.text.x = element_text(size = 14),    # Increase x-axis text size
+      axis.text.y = element_text(size = 14),    # Increase y-axis text size
+      axis.title.x = element_text(size = 16),   # Increase x-axis title size
+      axis.title.y = element_text(size = 16),   # Increase y-axis title size
+      legend.title = element_text(size = 12)    # Increase legend title size
+    )+
+    coord_fixed(ratio = 1)+
+    ylim(c(0, 9))+
+    guides(fill = "none")    # remove fill legend
+}
+
+dist_settings = c("cosine, nb", "cosine, poisson", "cosine, zinb")
+waveform_settings = c("cosine2, nb", "triangle, nb", "square, nb")
+
+phi_acc_dist_plot = plot_phi_acc_subset(df_filt, dist_settings)
+phi_acc_waveform_plot = plot_phi_acc_subset(df_filt, waveform_settings)
+phi_acc_dist_plot
+phi_acc_waveform_plot
+
+ggsave("~/Desktop/Simulated_phi_acc_dists.pdf", plot = phi_acc_dist_plot, width = 9, height = 4, units = "in")
+ggsave("~/Desktop/Simulated_phi_acc_waveforms.pdf", plot = phi_acc_waveform_plot, width = 9, height = 4, units = "in")
+```
+
+### Idealized Scenario:
+
+```{r}
+output_ideal = list()
+for(s in seq_len(nrow(sim_settings))){
+  wf = sim_settings$waveform[s]
+  dist = sim_settings$dist[s]
+  # for(i in seq(0, 4.5, by = 0.5)){
+  for(i in seq(0, 7, by = 0.5)){
+    print(paste0(wf, ", ", dist, ", phi = ", i))
+    phi_sd = i/12*pi
+    epsilon_sd = 0.3
+    # sim <- simulate_scRNAseq_circadian(n = 24000, m = 10000, p_circ = .25, phi_sd = phi_sd, n_time_points = 12,
+    #               amp_ratio_range = c(.2, 0.6), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1,2.0))
+    sim <- simulate_scRNAseq_circadian(n = 24000, m = 10000, p_circ = .1, phi_sd = phi_sd, n_time_points = 12,
+                  amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1, 1.2),
+                  waveform = wf, dist = dist)
+    
+    counts <- sim$counts
+    metadata <- sim$cell_metadata
+    gene_info <- sim$gene_parameters
+    
+    seurat_obj <- CreateSeuratObject(counts = counts, meta.data = metadata)
+    seurat_obj$orig.ident = seurat_obj$time_point
+    seurat_obj$seurat_clusters = "0"
+    
+    s_obj = prepare_seurat_for_orpheus(seurat_obj = seurat_obj)
+    orpheus_inputs = calculate_orpheus_inputs(s_obj, groups_to_analyze = "0", grouping_var = "seurat_clusters")
+    
+    tmp = orpheus_inputs[[1]]
+    pb_mat = tmp[[1]]
+    var_mat = tmp[[2]]
+    counts = tmp[[3]]
+    
+    #Variance of NB is var = mean + mean^2*theta
+    #rearrange to solve for theta = (var-mean)/mean^2
+    vars = sparseMatrixStats::rowVars(counts)
+    means = sparseMatrixStats::rowMeans2(counts)
+    agg_theta_meas = data.frame(coarse_theta = (vars-means)/means^2)
+    rownames(agg_theta_meas) = rownames(pb_mat)
+
+    # summary(agg_theta_meas$coarse_theta)
+    # 
+    # summary(means)
+    
+    ZT = as.numeric(colnames(pb_mat) )
+    
+    pb_cycling = is_cycling(ZT, pb_mat, time_units = "rad")
+    circ_genes = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(Gene_Symbols) %>% unname %>% unlist
+    circ_genes_phases = pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(acrophase_bulk)  %>% unname %>% unlist %>% as.numeric
+    
+    # length(circ_genes)
+    # pb_cycling %>% filter(as.numeric(p_statistic) < 0.05) %>% select(amp_ratio) %>% unname %>% unlist %>% as.numeric %>% summary
+    
+    var_cyclers = var_cycling_fix_acro(ZT, var_mat[circ_genes,], pb_mat[circ_genes,], phase_pb = circ_genes_phases, time_units = "rad")
+    phi = calc_phi( pb_cycling, var_cyclers, bulk_amp_thr = 0 )
+    input = var_cyclers %>% 
+      left_join(pb_cycling, by = "Gene_Symbols", suffix= c("_var", "_pb")) %>%
+      mutate(across(-Gene_Symbols, as.numeric)) %>%
+      filter(p_statistic < 0.05 & double_freq_p_statistic < 1) %>%
+      # mutate(acrodiff = (double_freq_acrophase - acrophase_bulk) %% pi) %>%
+      # mutate(keep_acrodiff = acrodiff < (pi / 2 + expected_acrodiff_thr) & acrodiff > (pi / 2 - expected_acrodiff_thr)) %>%
+      # filter(keep_acrodiff == TRUE) %>%
+      dplyr::select(Gene_Symbols, double_freq_amplitude,fund_amp, amplitude_bulk,mesor_bulk, everything()) %>%
+      column_to_rownames("Gene_Symbols")%>%
+      # filter( amplitude_bulk >= 0.5) %>%
+      # select(c(1:5)) %>%
+      filter(partial_model_AIC_var > full_model_AIC_var)
+    
+    plot_df = merge(input, phi, by = 0) %>%
+      merge(., gene_info, by.x="Row.names", by.y = 0)%>%
+      mutate(phase_error = (phi -phi_sd ))
+    plot_df$phi_true = phi_sd
+    # out = merge(plot_df, time_wise_theta_meas, by.x = "Row.names", by.y = 0)
+    out = merge(plot_df, agg_theta_meas, by.x = "Row.names", by.y = 0)
+    
+    output_ideal <- append(output_ideal, list(out))
+  }
+}
+
+
+#convert list into dataframe
+df_ideal = do.call(rbind, output_ideal)
+save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD_exotic.RData")
+
+```
+
+#### Plotting
+
+load:
+
+```{r}
+load("~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD_exotic.RData")
+```
+
+```{r}
+#Keep rows of results where bulk amp > thresh & not NaN
+df_filt_ideal = dplyr::filter(df_ideal, !is.na(phi) & amplitude_bulk >= 0.5 & phi_true*12/pi <= 5)
+df_filt_ideal$setting = factor(paste(df_filt_ideal$waveform, df_filt_ideal$dist, sep = ", "), levels = setting_levels)
+oracle_df_ideal = df_filt_ideal %>%
+  group_by(setting, phi_true) %>%
+  summarise(phi_oracle = median(phi_oracle, na.rm = TRUE), .groups = "drop")
+
+#Plot: Phi sd pred acc vs true phi sd
+df_filt_ideal$phi_true_factor = as.factor(df_filt_ideal$phi_true*12/pi)
+
+phi_acc_plot = ggplot(df_filt_ideal, aes(x = phi_true*12/pi,y =  phi*12/pi))+
+  # geom_boxplot(aes(group = phi_true_factor), outlier.size = 0.5, outlier.alpha = 0.2)+
+  geom_boxplot(aes(group = phi_true_factor, fill = phi_true*12/pi), outlier.shape = NA)+
+    scale_fill_distiller(palette = "Spectral", name = "true phase\ndispersion (hrs)") +
+
+  # geom_jitter(width = 0.1, alpha = 0.5) +
+  # geom_violin(aes(group = phi_true_factor)) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  #geom_line(data = oracle_df_ideal, aes(y = phi_oracle*12/pi), color = "black") +
+  facet_wrap(~setting, nrow = 2) +
+  # stat_summary(fun = median, geom = "point", size = 2.5, color = "skyblue")+
+  ggtitle("n=5000,m=10000,p_circ=.3,phi_sd=phi_sd,n_time_points=6,\namp_ratio_range=c(.3,0.75),G_range=c(.05,5),epsilon_sd=0.3,theta_range=c(0.01,2.5)")+
+  theme_minimal()+
+  xlab("True phase std. (hrs)")+
+  ylab("Predicted phase std. (hrs)")+
+  theme_bw()+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(color = "black", size = 12),
+    axis.text.x = element_text(size = 14),    # Increase x-axis text size
+    axis.text.y = element_text(size = 14),    # Increase y-axis text size
+    axis.title.x = element_text(size = 16),   # Increase x-axis title size
+    axis.title.y = element_text(size = 16),   # Increase y-axis title size
+    legend.title = element_text(size = 12),    # Increase legend title size
+    plot.title = element_text(size = 5)
+  )+
+  coord_fixed(ratio = 1)+
+  ylim(c(0, 9))+
+  guides(fill = "none")    # remove fill legend
+
+ggsave("~/Desktop/Simulated_phi_acc_idealized_exotic_simplified.pdf", plot = phi_acc_plot, width = 12, height = 8, units = "in")
+
+```
+
+#### Plotting by group: count distributions (cosine) and waveforms (NB)
+
+```{r}
+#plot_phi_acc_subset(), dist_settings and waveform_settings are defined in the realistic plotting section
+phi_acc_dist_plot_ideal = plot_phi_acc_subset(df_filt_ideal, dist_settings)
+phi_acc_waveform_plot_ideal = plot_phi_acc_subset(df_filt_ideal, waveform_settings)
+phi_acc_dist_plot_ideal
+phi_acc_waveform_plot_ideal
+
+ggsave("~/Desktop/Simulated_phi_acc_idealized_dists.pdf", plot = phi_acc_dist_plot_ideal, width = 9, height = 4, units = "in")
+ggsave("~/Desktop/Simulated_phi_acc_idealized_waveforms.pdf", plot = phi_acc_waveform_plot_ideal, width = 9, height = 4, units = "in")
+```
