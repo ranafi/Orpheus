@@ -16,7 +16,7 @@ library(sparseMatrixStats)
 
 ### Define waveform and theory helpers
 
-Cell rhythms are short harmonic sums w(t) = sum_k b_k cos(k t - psi_k) using odd harmonics only, so w(t - pi) = -w(t). Waves are normalized so (max - min)/2 = 1, which means A_true is still half the peak-to-trough distance. The fundamental (not the peak) is aligned to t = 0.
+Cell rhythms are short harmonic sums w(t) = sum_k b_k cos(k t - psi_k). Waves are normalized so (max - min)/2 = 1, which means A_true is still half the peak-to-trough distance. The fundamental (not the peak) is aligned to t = 0. Square, triangle and cosine2 use odd harmonics only, so w(t - pi) = -w(t). dfreq_in and dfreq_out add a 12h harmonic, which is the same for both gene groups (cos(2(t - pi)) = cos(2t)), so it does not cancel across genes.
 
 ```{r}
 eval_wave <- function(t, wave) {
@@ -39,6 +39,10 @@ make_wave <- function(waveform = "cosine", n_harmonics = 3, custom_wave = NULL) 
       triangle = list(k = k_odd, b = 1 / k_odd^2, psi = rep(0, length(k_odd))),
       # cosine2: cos(t) + 0.5*cos(3t - pi/2), i.e. the per2 = per/3, pha2 = pha1 + per2/4 wave in radians
       cosine2  = list(k = c(1, 3), b = c(1, 0.5), psi = c(0, pi/2)),
+      # 12h harmonic on the axis var_cycling_fix_acro tests (peaks at the mean's max/min): cos(t) + 0.2*cos(2t)
+      dfreq_in  = list(k = c(1, 2), b = c(1, 0.2), psi = c(0, 0)),
+      # 12h harmonic a quarter cycle off that axis: cos(t) + 0.2*sin(2t)
+      dfreq_out = list(k = c(1, 2), b = c(1, 0.2), psi = c(0, pi/2)),
       stop("Unknown waveform: ", waveform)
     )
   }
@@ -293,7 +297,8 @@ simulate_scRNAseq_circadian <- function(n = 10000, m = 5000, p_circ = 0.3,n_time
 Normalized cell rhythms (solid) and the bulk mean they produce after 3 hrs of phase dispersion (dashed).
 
 ```{r}
-wave_names = c("cosine", "square", "triangle", "cosine2")
+#cosine2 is still available in make_wave() but is not run for now
+wave_names = c("cosine", "square", "triangle", "dfreq_in", "dfreq_out")
 wave_df = lapply(wave_names, function(wf) {
   wave = make_wave(wf)
   t = seq(0, 2*2*pi, length.out = 400) #two wavelengths
@@ -313,7 +318,7 @@ waveform_plot = ggplot(wave_df, aes(x = ZT)) +
   theme_bw() +
   theme(strip.background = element_blank(), strip.text = element_text(color = "black", size = 12))
 waveform_plot
-ggsave("~/Desktop/Simulated_waveforms_2x2.pdf", plot = waveform_plot, width = 10, height = 10, units = "in")
+ggsave("~/Desktop/Simulated_waveforms_2x3.pdf", plot = waveform_plot, width = 10, height = 10, units = "in")
 ```
 
 Settings to sweep: every waveform with NB counts, plus the cosine with Poisson and ZINB counts.
@@ -344,7 +349,7 @@ for(s in seq_len(nrow(sim_settings))){
     #These are numbers based on hepatocytes 1
     sim <- simulate_scRNAseq_circadian(n = 8000, m = 10000, p_circ = .1, phi_sd = phi_sd, n_time_points = 6,
                   amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1, 1.2),
-                  waveform = wf, dist = dist)
+                  waveform = wf, dist = dist, zi_prob_range = c(0.05, 0.25))
 
     counts <- sim$counts
     metadata <- sim$cell_metadata
@@ -414,14 +419,14 @@ for(s in seq_len(nrow(sim_settings))){
 
 #convert list into dataframe (waveform and dist columns come from gene_parameters)
 df = do.call(rbind, output)
-save(df, file = "~/Desktop/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD_exotic.RData")
+save(df, file = "~/Desktop/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD_5waveforms_exotic.RData")
 
 ```
 
 Load data from above if already saved:
 
 ```{r}
-load("~/Desktop/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD_exotic.RData")
+load("~/Desktop/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD_5waveforms_exotic.RData")
 
 ```
 
@@ -589,7 +594,7 @@ plot_phi_acc_subset = function(plot_data, settings_to_plot) {
 }
 
 dist_settings = c("cosine, nb", "cosine, poisson", "cosine, zinb")
-waveform_settings = c("cosine2, nb", "triangle, nb", "square, nb")
+waveform_settings = c("triangle, nb", "square, nb", "dfreq_in, nb", "dfreq_out, nb")
 
 phi_acc_dist_plot = plot_phi_acc_subset(df_filt, dist_settings)
 phi_acc_waveform_plot = plot_phi_acc_subset(df_filt, waveform_settings)
@@ -597,7 +602,7 @@ phi_acc_dist_plot
 phi_acc_waveform_plot
 
 ggsave("~/Desktop/Simulated_phi_acc_dists.pdf", plot = phi_acc_dist_plot, width = 9, height = 4, units = "in")
-ggsave("~/Desktop/Simulated_phi_acc_waveforms.pdf", plot = phi_acc_waveform_plot, width = 9, height = 4, units = "in")
+ggsave("~/Desktop/Simulated_phi_acc_waveforms.pdf", plot = phi_acc_waveform_plot, width = 12, height = 4, units = "in")
 ```
 
 ### Idealized Scenario:
@@ -616,7 +621,7 @@ for(s in seq_len(nrow(sim_settings))){
     #               amp_ratio_range = c(.2, 0.6), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1,2.0))
     sim <- simulate_scRNAseq_circadian(n = 24000, m = 10000, p_circ = .1, phi_sd = phi_sd, n_time_points = 12,
                   amp_ratio_range = c(.15, 0.75), G_range = c(0.1, 5), epsilon_sd = epsilon_sd, theta_range = c(0.1, 1.2),
-                  waveform = wf, dist = dist)
+                  waveform = wf, dist = dist, zi_prob_range = c(0.05, 0.25))
     
     counts <- sim$counts
     metadata <- sim$cell_metadata
@@ -683,7 +688,7 @@ for(s in seq_len(nrow(sim_settings))){
 
 #convert list into dataframe
 df_ideal = do.call(rbind, output_ideal)
-save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD_exotic.RData")
+save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD_5waveforms_exotic.RData")
 
 ```
 
@@ -692,7 +697,7 @@ save(df_ideal, file = "~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized
 load:
 
 ```{r}
-load("~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD_exotic.RData")
+load("~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD_5waveforms_exotic.RData")
 ```
 
 ```{r}
@@ -750,5 +755,5 @@ phi_acc_dist_plot_ideal
 phi_acc_waveform_plot_ideal
 
 ggsave("~/Desktop/Simulated_phi_acc_idealized_dists.pdf", plot = phi_acc_dist_plot_ideal, width = 9, height = 4, units = "in")
-ggsave("~/Desktop/Simulated_phi_acc_idealized_waveforms.pdf", plot = phi_acc_waveform_plot_ideal, width = 9, height = 4, units = "in")
+ggsave("~/Desktop/Simulated_phi_acc_idealized_waveforms.pdf", plot = phi_acc_waveform_plot_ideal, width = 12, height = 4, units = "in")
 ```

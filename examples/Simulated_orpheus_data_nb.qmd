@@ -406,48 +406,80 @@ plot(names(power), power)
 
 #### False positive rate:
 
+Same true phase dispersion, different scenarios: draw n genes from the realistic simulation (8k cells, 6 time points) and n genes from the idealized one (24k cells, 12 time points), and test for a difference in estimated phi with a Wilcoxon rank-sum test. Any p < 0.05 is a false positive. The cosine/NB rows of the exotic simulation results are the same data this notebook produces.
+
 ```{r}
+#Load the exotic results into named objects so df / df_ideal in this notebook are not overwritten
+realistic_all = get(load("~/Desktop/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD_5waveforms_exotic.RData"))
+idealized_all = get(load("~/Desktop/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD_5waveforms_exotic.RData"))
+#Older run, identical cosine/NB rows:
+# realistic_all = get(load("~/Desktop/old_exotic_results/df_8kcells10kgenes_6times_epsilon03_0to7hrsSTD_exotic.RData"))
+# idealized_all = get(load("~/Desktop/old_exotic_results/df_24kcells10kgenes_12times_epsilon03_idealized_0to7hrsSTD_exotic.RData"))
 
-df_filt = dplyr::filter(df, !is.na(phi) & amplitude_bulk >= 0.5)
+#Same gene filter as the accuracy plots; phi_true is stored in radians, so compare in rounded hours
+filter_fpr_input = function(d) {
+  d %>%
+    filter(waveform == "cosine" & dist == "nb" & !is.na(phi) & amplitude_bulk >= 0.5) %>%
+    mutate(phi_true_hrs = round(phi_true*12/pi, 2))
+}
+realistic_fpr = filter_fpr_input(realistic_all)
+idealized_fpr = filter_fpr_input(idealized_all)
 
-ns = seq(5, 50, by = 5)
-phi_vals <- sort(unique(df_filt$phi_true))
+phi_hrs_test = c(2, 2.5, 3)
+ns = seq(5, 90, by = 5)
+n_boots = 1000
 
-n_boots <- 1000
+#Genes available per scenario; keep n at most about half of the smaller pool so repeated draws are not mostly the same genes
+pool_sizes = sapply(phi_hrs_test, function(h) c(realistic = sum(realistic_fpr$phi_true_hrs == h),
+                                                idealized = sum(idealized_fpr$phi_true_hrs == h)))
+colnames(pool_sizes) = phi_hrs_test
+pool_sizes
+stopifnot(max(ns) <= min(pool_sizes) / 2)
 
-
-results <- list()
-
-for (phi in phi_vals) {
-  A <- df_filt$phi[df_filt$phi_true == phi]
+set.seed(123)
+results = list()
+for (h in phi_hrs_test) {
+  A = realistic_fpr$phi[realistic_fpr$phi_true_hrs == h]
+  B = idealized_fpr$phi[idealized_fpr$phi_true_hrs == h]
   
   for (n in ns) {
-    pvals <- replicate(n_boots, {
-      sampA  <- sample(A, n, replace = FALSE)
-      sampA2 <- sample(A, n, replace = FALSE)
-      wilcox.test(sampA, sampA2)$p.value
+    pvals = replicate(n_boots, {
+      wilcox.test(sample(A, n, replace = FALSE), sample(B, n, replace = FALSE))$p.value
     })
     
-    fpr <- mean(pvals < 0.05)
-    
-    # store a row
-    results[[length(results) + 1]] <- data.frame(
-      phi_true = phi,
-      n = n,
-      fpr = fpr
-    )
+    results[[length(results) + 1]] = data.frame(phi_true_hrs = h, n = n, fpr = mean(pvals < 0.05))
   }
 }
+df_fpr = do.call(rbind, results)
+```
 
-df_fpr <- do.call(rbind, results)
+```{r}
+plot_fpr = function(fpr_data) {
+  ggplot(fpr_data, aes(x = n, y = fpr, color = factor(phi_true_hrs))) +
+    geom_line() +
+    geom_point(size = 1) +
+    geom_hline(yintercept = 0.05, linetype = "dashed") +
+    scale_color_brewer(palette = "Dark2") +
+    xlab("Genes drawn per scenario (n)") +
+    ylab("False positive rate") +
+    labs(color = "True phase\ndispersion (hrs)") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(size = 14),
+      axis.text.y = element_text(size = 14),
+      axis.title.x = element_text(size = 16),
+      axis.title.y = element_text(size = 16),
+      legend.title = element_text(size = 12)
+    )
+}
 
-library(ggplot2)
+fpr_plot_3hr = plot_fpr(filter(df_fpr, phi_true_hrs == 3)) + guides(color = "none")
+fpr_plot_all = plot_fpr(df_fpr)
+fpr_plot_3hr
+fpr_plot_all
 
-ggplot(df_fpr, aes(x = n, y = fpr, color = factor(phi_true*12/pi))) +
-  geom_line() +
-  geom_hline(yintercept = 0.05, linetype = "dashed") +
-  theme_bw() +
-  labs(color = "phi_true", y = "False positive rate")
+ggsave("~/Desktop/FPR_realistic_vs_idealized_3hr.pdf", plot = fpr_plot_3hr, width = 5, height = 4, units = "in")
+ggsave("~/Desktop/FPR_realistic_vs_idealized_2to3hr.pdf", plot = fpr_plot_all, width = 6, height = 4, units = "in")
 ```
 
 ### Idealized Scenario:

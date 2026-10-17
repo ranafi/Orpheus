@@ -1,0 +1,178 @@
+---
+title: "NB_theta_boxplots"
+format: html
+editor: visual
+---
+
+### Load libs and data
+
+Boxplots of the estimated NB overdispersion (NB_theta) for each sheet of Dataset S1.
+
+```{r}
+library(readxl)
+library(tidyverse)
+
+xlsx_path = "~/Downloads/Dataset_S1.xlsx"
+sheets = excel_sheets(xlsx_path)
+sheets
+
+S1 = lapply(sheets, function(s) read_excel(xlsx_path, sheet = s))
+names(S1) = sheets
+
+jitter_width <- 0.15
+jitter_seed <- 123 # A specific seed for reproducibility
+
+#Range of NB_theta used in the realistic and idealized simulations (theta_range = c(0.1, 1.2))
+sim_theta_range = c(0.1, 1.2)
+```
+
+### Plotting function
+
+Same format as the phi boxplots in AD_cells.qmd. A Wilcoxon significance bar (same star cutoffs as stat_compare_means) is drawn only when there are exactly two groups. With `y_max`, the y-axis is cut at that value: the boxes still use every gene, and points above the cut are drawn at the limit as triangles.
+
+```{r}
+plot_theta_box = function(d, group_col, fill_values, title, x_lab, x_labels = waiver(), y_max = NULL) {
+  d = d %>% mutate(group = factor(.data[[group_col]]))
+  #A single unnamed color is used for every group
+  if (is.null(names(fill_values)) && length(fill_values) == 1) {
+    fill_values = setNames(rep(fill_values, nlevels(d$group)), levels(d$group))
+  }
+  #Points above y_max are drawn at y_max
+  if (is.null(y_max)) y_max = max(d$NB_theta, na.rm = TRUE)
+  d = d %>% mutate(above_cap = NB_theta > y_max, theta_plot = pmin(NB_theta, y_max))
+  y_min = min(d$NB_theta, na.rm = TRUE)
+  y_pad = 0.05 * (y_max - y_min)
+
+  median_df = d %>%
+    dplyr::group_by(group) %>%
+    dplyr::summarise(median_theta = median(NB_theta, na.rm = TRUE))
+
+  p = ggplot(d, aes(x = group, y = NB_theta, fill = group)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(
+      aes(x = group, y = theta_plot, shape = above_cap),
+      alpha = 0.4,
+      position = position_jitter(width = jitter_width, seed = jitter_seed)
+    ) +
+    # Manually set the colors for fill and color aesthetics
+    scale_fill_manual(values = fill_values) +
+    scale_color_manual(values = fill_values) +
+    scale_shape_manual(values = c("FALSE" = 16, "TRUE" = 17)) +
+    geom_label(
+      data = median_df,
+      aes(x = group, y = median_theta, label = round(median_theta, 2)),
+      vjust = -0.3, # Just above the median line, so labels stay on their own box with several groups
+      fill = "white",
+      alpha = 0.8,
+      label.size = 0,
+      label.padding = unit(0.1, "lines"),
+      fontface = "bold",
+      size = 3) +
+    labs(
+      title = title,
+      y = "NB overdispersion (theta)",
+      x = x_lab
+    ) +
+    theme_bw(base_size = 14) +
+    theme(
+      legend.position = "none", # The x-axis labels are sufficient
+      plot.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 20, hjust = 1), # Angle labels
+      axis.text.y = element_text(size = 14),    # Increase y-axis text size
+      axis.title.x = element_text(size = 16),   # Increase x-axis title size
+      axis.title.y = element_text(size = 16),   # Increase y-axis title size
+      legend.title = element_text(size = 12),   # Increase legend title size
+    ) +
+    scale_x_discrete(labels = x_labels) +
+    #coord_cartesian zooms without dropping genes from the box statistics
+    coord_cartesian(ylim = c(y_min, y_max + 3 * y_pad)) # Room above y_max for the significance bar
+
+  n_above = sum(d$above_cap, na.rm = TRUE)
+  if (n_above > 0) {
+    p = p + labs(caption = paste0("Triangles: ", n_above, ifelse(n_above == 1, " gene", " genes"),
+                                  " with theta > ", y_max, ", drawn at the limit"))
+  }
+
+  if (nlevels(d$group) == 2) {
+    #Significance bar drawn by hand. stat_compare_means() offsets the bar by a fraction of the
+    #full data range (including genes above y_max), which pushes it out of the zoomed plot.
+    #The test uses every gene, not the capped values.
+    groups = levels(d$group)
+    p_val = wilcox.test(d$NB_theta[d$group == groups[1]], d$NB_theta[d$group == groups[2]])$p.value
+    p_signif = as.character(symnum(p_val, corr = FALSE, na = FALSE,
+                                   cutpoints = c(0, 1e-04, 0.001, 0.01, 0.05, Inf),
+                                   symbols = c("****", "***", "**", "*", "ns")))
+    y_bar = y_max + y_pad
+    tip = 0.02 * (y_bar - y_min) # Length of the small vertical lines
+    p = p +
+      annotate("segment", x = c(1, 1, 2), xend = c(1, 2, 2),
+               y = c(y_bar - tip, y_bar, y_bar), yend = c(y_bar, y_bar, y_bar - tip)) +
+      annotate("text", x = 1.5, y = y_bar, label = p_signif, vjust = -0.3, size = 5)
+  }
+  p
+}
+```
+
+### Sheet 1: mouse SCN
+
+```{r}
+#Both SCN cell types as one group
+theta_scn = plot_theta_box(S1[[1]] %>% mutate(all_cells = "SCN"), "all_cells",
+                           fill_values = rgb(146, 203, 193, maxColorValue = 255),
+                           title = "Mouse SCN", x_lab = "Cell type", y_max = 2)
+theta_scn
+ggsave("~/Desktop/NB_theta_boxplot_mouse_SCN.pdf", theta_scn, device = "pdf", width = 5, height = 5)
+```
+
+### Sheet 2: mouse hepatocytes combined
+
+```{r}
+theta_hep_combined = plot_theta_box(S1[[2]], "cell_type", fill_values = rgb(183, 226, 94, maxColorValue = 255),
+                                    title = "Mouse hepatocytes (combined)", x_lab = "Cell type")
+theta_hep_combined
+ggsave("~/Desktop/NB_theta_boxplot_hepatocytes_combined.pdf", theta_hep_combined, device = "pdf", width = 5, height = 5)
+```
+
+### Sheet 3: mouse hepatocytes separate (split by cell type)
+
+```{r}
+custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
+
+theta_hep_separate = plot_theta_box(S1[[3]], "cell_type", fill_values = custom_colors,
+                                    title = "Mouse hepatocytes (separate)", x_lab = "Cell type")
+theta_hep_separate
+ggsave("~/Desktop/NB_theta_boxplot_hepatocytes_separate.pdf", theta_hep_separate, device = "pdf", width = 6, height = 5)
+```
+
+### Sheet 4: human excitatory neurons, AD vs CTL (split by condition)
+
+```{r}
+color_palette <- c("0" = "skyblue", "1" = "salmon")
+
+theta_AD = plot_theta_box(S1[[4]], "condition", fill_values = color_palette,
+                          title = "Human excitatory neurons", x_lab = "Condition",
+                          x_labels = c("0" = "CTL", "1" = "AD"), y_max = 2.0)
+theta_AD
+ggsave("~/Desktop/NB_theta_boxplot_AD_CTL.pdf", theta_AD, device = "pdf", width = 5, height = 5)
+```
+
+Same plot with the simulated range of NB_theta shaded. The subtitle gives the percent of genes inside that range.
+
+```{r}
+pct_in_sim_range = S1[[4]] %>%
+  group_by(condition) %>%
+  summarise(pct = round(100 * mean(NB_theta >= sim_theta_range[1] & NB_theta <= sim_theta_range[2], na.rm = TRUE)))
+pct_in_sim_range
+
+theta_AD_sim_range = theta_AD +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = sim_theta_range[1], ymax = sim_theta_range[2],
+           fill = "grey50", alpha = 0.2) +
+  geom_hline(yintercept = sim_theta_range, linetype = "dashed", color = "grey40") +
+  labs(subtitle = paste0("Shaded: simulated theta (", sim_theta_range[1], "-", sim_theta_range[2], ")\n",
+                         "CTL ", pct_in_sim_range$pct[pct_in_sim_range$condition == 0], "%, ",
+                         "AD ", pct_in_sim_range$pct[pct_in_sim_range$condition == 1], "% of genes inside"))
+#Draw the shaded band behind the boxes and points
+theta_AD_sim_range$layers = c(tail(theta_AD_sim_range$layers, 2), head(theta_AD_sim_range$layers, -2))
+theta_AD_sim_range
+ggsave("~/Desktop/NB_theta_boxplot_AD_CTL_sim_range.pdf", theta_AD_sim_range, device = "pdf", width = 5, height = 5)
+```
