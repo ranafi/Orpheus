@@ -176,3 +176,47 @@ theta_AD_sim_range$layers = c(tail(theta_AD_sim_range$layers, 2), head(theta_AD_
 theta_AD_sim_range
 ggsave("~/Desktop/NB_theta_boxplot_AD_CTL_sim_range.pdf", theta_AD_sim_range, device = "pdf", width = 5, height = 5)
 ```
+
+### Phase dispersion by NB overdispersion and relative bulk amplitude
+
+Each point is a gene estimate from Dataset S1. Panels follow the workbook's sheet order. Phase dispersion is shown in hours. Relative bulk amplitude is the 24 h bulk amplitude divided by the bulk mesor for rows with a finite, positive mesor. The theta axis uses a pseudo-log scale to show the spread near zero while retaining negative estimates and the upper tail.
+
+```{r}
+S1_phi <- bind_rows(S1, .id = "dataset") %>%
+  mutate(
+    dataset = factor(dataset, levels = names(S1)),
+    relative_bulk_amplitude = `24hr_amp_bulk` / if_else(is.finite(mesor_bulk) & mesor_bulk > 0,
+                                                        mesor_bulk, NA_real_)
+  )
+
+plot_phi_scatter <- function(d, x_col, phi_col, x_lab) {
+  d %>%
+    mutate(phi_hours = .data[[phi_col]] * 12 / pi) %>%
+    filter(is.finite(phi_hours), is.finite(.data[[x_col]])) %>%
+    ggplot(aes(x = .data[[x_col]], y = phi_hours)) +
+    geom_point(color = "#21657D", alpha = 0.5, size = 1.4) +
+    expand_limits(y = 0) +
+    labs(x = x_lab, y = "Estimated phase dispersion (h)") +
+    theme_bw(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold"),
+          plot.caption = element_text(hjust = 0))
+}
+
+phi_vs_theta <- plot_phi_scatter(S1_phi, "NB_theta", "phi_phase_dispersion", "NB overdispersion (theta)") +
+  facet_wrap(vars(dataset), ncol = 2) +
+  scale_x_continuous(transform = scales::pseudo_log_trans(sigma = 0.1),
+                     breaks = c(-1, -0.25, 0, 0.25, 1, 5)) +
+  labs(caption = "Theta is displayed on a pseudo-log scale.")
+
+phi_vs_relative_amp <- plot_phi_scatter(S1_phi, "relative_bulk_amplitude", "phi_phase_dispersion",
+                                        "Relative bulk amplitude (24 h amplitude / mesor)") +
+  facet_wrap(vars(dataset), ncol = 2) +
+  scale_x_continuous(breaks = scales::breaks_width(0.25), labels = scales::label_percent(),
+                     expand = expansion(mult = 0.07))
+
+phi_vs_theta
+phi_vs_relative_amp
+
+ggsave("~/Desktop/phi_vs_NB_theta.pdf", phi_vs_theta, width = 8, height = 6)
+ggsave("~/Desktop/phi_vs_relative_bulk_amplitude.pdf", phi_vs_relative_amp, width = 8, height = 6)
+```

@@ -757,3 +757,104 @@ phi_acc_waveform_plot_ideal
 ggsave("~/Desktop/Simulated_phi_acc_idealized_dists.pdf", plot = phi_acc_dist_plot_ideal, width = 9, height = 4, units = "in")
 ggsave("~/Desktop/Simulated_phi_acc_idealized_waveforms.pdf", plot = phi_acc_waveform_plot_ideal, width = 12, height = 4, units = "in")
 ```
+
+### Example single-cell rhythms
+
+Each example simulation uses its scenario's cell count and sampling schedule (8,000 cells across 6 times for realistic and 24,000 cells across 12 times for idealized), with the same expression parameter ranges as the sweeps. From a small pool of circadian genes, the figure shows the gene with the largest theoretical bulk amplitude in each of the two phase groups. Genes are drawn separately for each scenario. ZT 0 and ZT 24 are separate samples at the same phase of the cycle.
+
+```{r}
+
+example_phase_sd_hours <- 3
+
+simulate_example_counts <- function(scenario, n_cells, n_times, seed) {
+  example_sim <- simulate_scRNAseq_circadian(
+    n = n_cells, m = 40, p_circ = 1, n_time_points = n_times,
+    phi_sd = example_phase_sd_hours * pi / 12, amp_ratio_range = c(0.15, 0.75),
+    G_range = c(0.1, 5), epsilon_sd = 0.3, theta_range = c(0.1, 1.2),
+    waveform = "cosine", dist = "nb", seed = seed
+  )
+
+  examples <- example_sim$gene_parameters %>%
+    mutate(peak = if_else(row_number() %% 2L == 1L, "ZT 0 peak", "ZT 12 peak")) %>%
+    group_by(peak) %>%
+    slice_max(S_amp_theoret, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    arrange(peak)
+
+  as_tibble(t(example_sim$counts[examples$gene_id, , drop = FALSE])) %>%
+    mutate(ZT = example_sim$cell_metadata$time_point * 12 / pi) %>%
+    pivot_longer(-ZT, names_to = "gene_id", values_to = "count") %>%
+    left_join(select(examples, gene_id, peak), by = "gene_id") %>%
+    mutate(panel = sprintf("%s (%d times)\n%s", scenario, n_times, peak))
+}
+
+example_counts <- bind_rows(
+  simulate_example_counts("Realistic", n_cells = 8000, n_times = 6, seed = 123),
+  simulate_example_counts("Idealized", n_cells = 24000, n_times = 12, seed = 124)
+) %>%
+  mutate(panel = factor(panel, levels = unique(panel)))
+
+example_moments <- example_counts %>%
+  group_by(panel, ZT) %>%
+  summarise(mean_count = mean(count), variance = var(count),
+            count_q99 = quantile(count, 0.99, type = 1), .groups = "drop")
+
+# Use a shared display range that shows at least 99% of cells at every sampled time.
+example_max_count <- max(example_moments$count_q99)
+example_frequencies <- example_counts %>%
+  dplyr::count(panel, ZT, count, name = "n_cells") %>%
+  group_by(panel, ZT) %>%
+  mutate(fraction = n_cells / sum(n_cells)) %>%
+  ungroup() %>%
+  filter(count <= example_max_count)
+
+example_time_axis <- scale_x_continuous(breaks = seq(0, 24, by = 6), limits = c(-1, 25),
+                                        expand = expansion(mult = 0))
+example_theme <- theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank(),
+        strip.background = element_rect(fill = "grey96"), strip.text = element_text(face = "bold"),
+        panel.spacing.x = grid::unit(9, "pt"), legend.position = "bottom")
+
+example_count_plot <- ggplot(example_frequencies, aes(x = ZT)) +
+  geom_tile(aes(y = count, fill = fraction), width = 1.5, height = 1) +
+  geom_line(data = example_moments, aes(y = mean_count), color = "#9D3516", linewidth = 0.6) +
+  geom_point(data = example_moments, aes(y = mean_count), shape = 21, fill = "#9D3516",
+             color = "white", size = 2.2, stroke = 0.35) +
+  facet_wrap(~panel, nrow = 1) +
+  example_time_axis +
+  scale_y_continuous(breaks = scales::breaks_width(5), expand = expansion(add = 0)) +
+  coord_cartesian(ylim = c(-0.5, example_max_count + 0.5)) +
+  scale_fill_gradient(low = "#EDF5F8", high = "#17637A", transform = "sqrt",
+                      limits = c(0, max(example_frequencies$fraction)), breaks = c(0, 0.05, 0.15, 0.30),
+                      labels = scales::label_percent(), name = "Cells at each sampled time",
+                      guide = guide_colourbar(barwidth = grid::unit(50, "mm"), barheight = grid::unit(3, "mm"))) +
+  labs(x = NULL, y = "Raw counts per cell") +
+  example_theme +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+#example_variance_plot <- ggplot(example_moments, aes(x = ZT, y = variance)) +
+#  geom_line(color = "#343A40", linewidth = 0.6) +
+#  geom_point(color = "#343A40", size = 1.7) +
+#  facet_wrap(~panel, nrow = 1) +
+#  example_time_axis +
+#  expand_limits(y = 0) +
+#  labs(x = "Zeitgeber time (h)", y = "Count variance") +
+#  example_theme +
+#  theme(strip.text.x = element_blank())
+
+example_rhythm_plot <- patchwork::wrap_plots(
+  example_count_plot, ncol = 1, heights = c(2.5), guides = "collect"
+) + patchwork::plot_annotation(
+  title = "Example simulated circadian rhythms",
+  subtitle = paste("Cosine rhythms with negative binomial counts and a true phase SD of",
+                   example_phase_sd_hours, "h"),
+  caption = sprintf(paste0("Orange points show the mean at each sampled time. ",
+                           "Tiles show counts up to %d (at least 99%% of cells at each time).\n"), example_max_count),
+  theme = theme(plot.title = element_text(face = "bold"), plot.caption = element_text(hjust = 0))
+)
+example_rhythm_plot <- example_rhythm_plot & theme(legend.position = "bottom")
+
+ggsave("~/Desktop/example_single_cell_rhythms.pdf", plot = example_rhythm_plot,
+       width = 10, height = 6, units = "in")
+example_rhythm_plot
+```
