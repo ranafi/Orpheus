@@ -6,7 +6,7 @@ editor: visual
 
 ### Load libs and data
 
-Boxplots of the estimated NB overdispersion (NB_theta) for each sheet of Dataset S1.
+Boxplots of estimated NB overdispersion (`NB_theta`) and baseline expression (`G`) for each sheet of Dataset S1.
 
 ```{r}
 library(readxl)
@@ -24,6 +24,7 @@ jitter_seed <- 123 # A specific seed for reproducibility
 
 #Range of NB_theta used in the realistic and idealized simulations (theta_range = c(0.1, 1.2))
 sim_theta_range = c(0.1, 1.2)
+sim_G_range = c(0.1, 5)
 ```
 
 ### Plotting function
@@ -31,36 +32,36 @@ sim_theta_range = c(0.1, 1.2)
 Same format as the phi boxplots in AD_cells.qmd. A Wilcoxon significance bar (same star cutoffs as stat_compare_means) is drawn only when there are exactly two groups. With `y_max`, the y-axis is cut at that value: the boxes still use every gene, and points above the cut are drawn at the limit as triangles.
 
 ```{r}
-plot_theta_box = function(d, group_col, fill_values, title, x_lab, x_labels = waiver(), y_max = NULL) {
-  d = d %>% mutate(group = factor(.data[[group_col]]))
+plot_parameter_box = function(d, group_col, fill_values, title, x_lab, x_labels = waiver(),
+                              y_max = NULL, y_min = NULL, value_col = "NB_theta",
+                              y_lab = "NB overdispersion (theta)", value_name = "theta") {
+  d = d %>% mutate(group = factor(.data[[group_col]]), value = .data[[value_col]])
   #A single unnamed color is used for every group
   if (is.null(names(fill_values)) && length(fill_values) == 1) {
     fill_values = setNames(rep(fill_values, nlevels(d$group)), levels(d$group))
   }
   #Points above y_max are drawn at y_max
-  if (is.null(y_max)) y_max = max(d$NB_theta, na.rm = TRUE)
-  d = d %>% mutate(above_cap = NB_theta > y_max, theta_plot = pmin(NB_theta, y_max))
-  y_min = min(d$NB_theta, na.rm = TRUE)
+  if (is.null(y_max)) y_max = max(d$value, na.rm = TRUE)
+  d = d %>% mutate(above_cap = value > y_max, value_plot = pmin(value, y_max))
+  if (is.null(y_min)) y_min = min(d$value, na.rm = TRUE)
   y_pad = 0.05 * (y_max - y_min)
 
   median_df = d %>%
     dplyr::group_by(group) %>%
-    dplyr::summarise(median_theta = median(NB_theta, na.rm = TRUE))
+    dplyr::summarise(median_value = median(value, na.rm = TRUE))
 
-  p = ggplot(d, aes(x = group, y = NB_theta, fill = group)) +
+  p = ggplot(d, aes(x = group, y = value, fill = group)) +
     geom_boxplot(outlier.shape = NA, alpha = 0.7) +
     geom_jitter(
-      aes(x = group, y = theta_plot, shape = above_cap),
+      aes(x = group, y = value_plot, shape = above_cap),
       alpha = 0.4,
       position = position_jitter(width = jitter_width, seed = jitter_seed)
     ) +
-    # Manually set the colors for fill and color aesthetics
     scale_fill_manual(values = fill_values) +
-    scale_color_manual(values = fill_values) +
     scale_shape_manual(values = c("FALSE" = 16, "TRUE" = 17)) +
     geom_label(
       data = median_df,
-      aes(x = group, y = median_theta, label = round(median_theta, 2)),
+      aes(x = group, y = median_value, label = round(median_value, 2)),
       vjust = -0.3, # Just above the median line, so labels stay on their own box with several groups
       fill = "white",
       alpha = 0.8,
@@ -70,7 +71,7 @@ plot_theta_box = function(d, group_col, fill_values, title, x_lab, x_labels = wa
       size = 3) +
     labs(
       title = title,
-      y = "NB overdispersion (theta)",
+      y = y_lab,
       x = x_lab
     ) +
     theme_bw(base_size = 14) +
@@ -90,7 +91,7 @@ plot_theta_box = function(d, group_col, fill_values, title, x_lab, x_labels = wa
   n_above = sum(d$above_cap, na.rm = TRUE)
   if (n_above > 0) {
     p = p + labs(caption = paste0("Triangles: ", n_above, ifelse(n_above == 1, " gene", " genes"),
-                                  " with theta > ", y_max, ", drawn at the limit"))
+                                  " with ", value_name, " > ", y_max, ", drawn at the limit"))
   }
 
   if (nlevels(d$group) == 2) {
@@ -98,7 +99,7 @@ plot_theta_box = function(d, group_col, fill_values, title, x_lab, x_labels = wa
     #full data range (including genes above y_max), which pushes it out of the zoomed plot.
     #The test uses every gene, not the capped values.
     groups = levels(d$group)
-    p_val = wilcox.test(d$NB_theta[d$group == groups[1]], d$NB_theta[d$group == groups[2]])$p.value
+    p_val = wilcox.test(d$value[d$group == groups[1]], d$value[d$group == groups[2]])$p.value
     p_signif = as.character(symnum(p_val, corr = FALSE, na = FALSE,
                                    cutpoints = c(0, 1e-04, 0.001, 0.01, 0.05, Inf),
                                    symbols = c("****", "***", "**", "*", "ns")))
@@ -111,13 +112,23 @@ plot_theta_box = function(d, group_col, fill_values, title, x_lab, x_labels = wa
   }
   p
 }
+
+add_sim_range = function(p, sim_range, subtitle) {
+  background = list(
+    annotate("rect", xmin = -Inf, xmax = Inf, ymin = sim_range[1], ymax = sim_range[2],
+             fill = "grey50", alpha = 0.2),
+    geom_hline(yintercept = sim_range, linetype = "dashed", color = "grey40")
+  )
+  p$layers = c(background, p$layers)
+  p + labs(subtitle = subtitle)
+}
 ```
 
 ### Sheet 1: mouse SCN
 
 ```{r}
 #Both SCN cell types as one group
-theta_scn = plot_theta_box(S1[[1]] %>% mutate(all_cells = "SCN"), "all_cells",
+theta_scn = plot_parameter_box(S1[[1]] %>% mutate(all_cells = "SCN"), "all_cells",
                            fill_values = rgb(146, 203, 193, maxColorValue = 255),
                            title = "Mouse SCN", x_lab = "Cell type", y_max = 2)
 theta_scn
@@ -127,7 +138,7 @@ ggsave("~/Desktop/NB_theta_boxplot_mouse_SCN.pdf", theta_scn, device = "pdf", wi
 ### Sheet 2: mouse hepatocytes combined
 
 ```{r}
-theta_hep_combined = plot_theta_box(S1[[2]], "cell_type", fill_values = rgb(183, 226, 94, maxColorValue = 255),
+theta_hep_combined = plot_parameter_box(S1[[2]], "cell_type", fill_values = rgb(183, 226, 94, maxColorValue = 255),
                                     title = "Mouse hepatocytes (combined)", x_lab = "Cell type")
 theta_hep_combined
 ggsave("~/Desktop/NB_theta_boxplot_hepatocytes_combined.pdf", theta_hep_combined, device = "pdf", width = 5, height = 5)
@@ -138,7 +149,7 @@ ggsave("~/Desktop/NB_theta_boxplot_hepatocytes_combined.pdf", theta_hep_combined
 ```{r}
 custom_colors <- c("cholangiocytes" = "#883923", "endothelial cells 1" = "#E68613", "hepatocytes 1" = "#E69F00", "hepatocytes 2" = "#56B4E9", "kupffer cells" = "#00BFC4", "pericentral hepatocytes" = "#F8766D", "periportal hepatocytes" = "#F0E442")
 
-theta_hep_separate = plot_theta_box(S1[[3]], "cell_type", fill_values = custom_colors,
+theta_hep_separate = plot_parameter_box(S1[[3]], "cell_type", fill_values = custom_colors,
                                     title = "Mouse hepatocytes (separate)", x_lab = "Cell type")
 theta_hep_separate
 ggsave("~/Desktop/NB_theta_boxplot_hepatocytes_separate.pdf", theta_hep_separate, device = "pdf", width = 6, height = 5)
@@ -149,7 +160,7 @@ ggsave("~/Desktop/NB_theta_boxplot_hepatocytes_separate.pdf", theta_hep_separate
 ```{r}
 color_palette <- c("0" = "skyblue", "1" = "salmon")
 
-theta_AD = plot_theta_box(S1[[4]], "condition", fill_values = color_palette,
+theta_AD = plot_parameter_box(S1[[4]], "condition", fill_values = color_palette,
                           title = "Human excitatory neurons", x_lab = "Condition",
                           x_labels = c("0" = "CTL", "1" = "AD"), y_max = 2.0)
 theta_AD
@@ -164,22 +175,65 @@ pct_in_sim_range = S1[[4]] %>%
   summarise(pct = round(100 * mean(NB_theta >= sim_theta_range[1] & NB_theta <= sim_theta_range[2], na.rm = TRUE)))
 pct_in_sim_range
 
-theta_AD_sim_range = theta_AD +
-  annotate("rect", xmin = -Inf, xmax = Inf, ymin = sim_theta_range[1], ymax = sim_theta_range[2],
-           fill = "grey50", alpha = 0.2) +
-  geom_hline(yintercept = sim_theta_range, linetype = "dashed", color = "grey40") +
-  labs(subtitle = paste0("Shaded: simulated theta (", sim_theta_range[1], "-", sim_theta_range[2], ")\n",
-                         "CTL ", pct_in_sim_range$pct[pct_in_sim_range$condition == 0], "%, ",
-                         "AD ", pct_in_sim_range$pct[pct_in_sim_range$condition == 1], "% of genes inside"))
-#Draw the shaded band behind the boxes and points
-theta_AD_sim_range$layers = c(tail(theta_AD_sim_range$layers, 2), head(theta_AD_sim_range$layers, -2))
+theta_AD_sim_range = add_sim_range(
+  theta_AD, sim_theta_range,
+  paste0("Shaded: simulated theta (", sim_theta_range[1], "-", sim_theta_range[2], ")\n",
+         "CTL ", pct_in_sim_range$pct[pct_in_sim_range$condition == 0], "%, ",
+         "AD ", pct_in_sim_range$pct[pct_in_sim_range$condition == 1], "% of genes inside")
+)
 theta_AD_sim_range
 ggsave("~/Desktop/NB_theta_boxplot_AD_CTL_sim_range.pdf", theta_AD_sim_range, device = "pdf", width = 5, height = 5)
 ```
 
-### Phase dispersion by NB overdispersion and relative bulk amplitude
+### Baseline expression (G) with the simulated range
 
-Each point is a gene estimate from Dataset S1. Panels follow the workbook's sheet order. Phase dispersion is shown in hours. Relative bulk amplitude is the 24 h bulk amplitude divided by the bulk mesor for rows with a finite, positive mesor. The theta axis uses a pseudo-log scale to show the spread near zero while retaining negative estimates and the upper tail.
+The shaded band covers the simulated range of 0.1 to 5. The subtitle gives the percentage of genes in that range for each group. Triangles at 10 represent higher values. The boxplots, median labels, and Wilcoxon test use the original values.
+
+```{r}
+plot_G_box = function(d, group_col, fill_values, title, x_lab, x_labels = waiver()) {
+  p = plot_parameter_box(d, group_col, fill_values, title, x_lab, x_labels = x_labels,
+                         y_max = 10, y_min = 0, value_col = "G", y_lab = "Baseline expression (G)",
+                         value_name = "G") +
+    scale_y_continuous(breaks = seq(0, 10, by = 2.5))
+  pct_by_group = d %>%
+    group_by(group = factor(.data[[group_col]])) %>%
+    summarise(pct = round(100 * mean(between(G, sim_G_range[1], sim_G_range[2]), na.rm = TRUE)),
+              .groups = "drop")
+  group_names = as.character(pct_by_group$group)
+  if (!inherits(x_labels, "waiver")) group_names = unname(x_labels[group_names])
+  pct_labels = paste(group_names, paste0(pct_by_group$pct, "%"))
+  pct_lines = vapply(split(pct_labels, ceiling(seq_along(pct_labels) / 2)), paste,
+                     character(1), collapse = ", ")
+  subtitle = paste0("Genes in the shaded range (G = ", paste(sim_G_range, collapse = "-"), ")\n",
+                    paste(pct_lines, collapse = "\n"))
+  add_sim_range(p, sim_G_range, subtitle)
+}
+
+G_scn = plot_G_box(S1[[1]] %>% mutate(all_cells = "SCN"), "all_cells",
+                   fill_values = rgb(146, 203, 193, maxColorValue = 255),
+                   title = "Mouse SCN", x_lab = "Cell type")
+G_hep_combined = plot_G_box(S1[[2]], "cell_type", fill_values = rgb(183, 226, 94, maxColorValue = 255),
+                            title = "Mouse hepatocytes (combined)", x_lab = "Cell type")
+G_hep_separate = plot_G_box(S1[[3]], "cell_type", fill_values = custom_colors,
+                            title = "Mouse hepatocytes (separate)", x_lab = "Cell type")
+G_AD = plot_G_box(S1[[4]], "condition", fill_values = color_palette,
+                  title = "Human excitatory neurons", x_lab = "Condition",
+                  x_labels = c("0" = "CTL", "1" = "AD"))
+
+G_scn
+G_hep_combined
+G_hep_separate
+G_AD
+
+ggsave("~/Desktop/G_boxplot_mouse_SCN_sim_range.pdf", G_scn, width = 5, height = 5)
+ggsave("~/Desktop/G_boxplot_hepatocytes_combined_sim_range.pdf", G_hep_combined, width = 5, height = 5)
+ggsave("~/Desktop/G_boxplot_hepatocytes_separate_sim_range.pdf", G_hep_separate, width = 6, height = 5)
+ggsave("~/Desktop/G_boxplot_AD_CTL_sim_range.pdf", G_AD, width = 5, height = 5)
+```
+
+### Phase dispersion by NB overdispersion, relative bulk amplitude, and baseline expression
+
+Each point is a gene estimate from Dataset S1. Panels follow the workbook's sheet order. Phase dispersion is shown in hours. Relative bulk amplitude is the 24 h bulk amplitude divided by the bulk mesor for rows with a finite, positive mesor. The theta and `G` axes use pseudo-log scales to show the spread near zero and the upper tails.
 
 ```{r}
 S1_phi <- bind_rows(S1, .id = "dataset") %>%
@@ -214,9 +268,17 @@ phi_vs_relative_amp <- plot_phi_scatter(S1_phi, "relative_bulk_amplitude", "phi_
   scale_x_continuous(breaks = scales::breaks_width(0.25), labels = scales::label_percent(),
                      expand = expansion(mult = 0.07))
 
+phi_vs_G <- plot_phi_scatter(S1_phi, "G", "phi_phase_dispersion", "Baseline expression (G)") +
+  facet_wrap(vars(dataset), ncol = 2) +
+  scale_x_continuous(transform = scales::pseudo_log_trans(sigma = 0.1),
+                     breaks = c(0.1, 0.5, 2, 5, 20, 50)) +
+  labs(caption = "G is displayed on a pseudo-log scale.")
+
 phi_vs_theta
 phi_vs_relative_amp
+phi_vs_G
 
 ggsave("~/Desktop/phi_vs_NB_theta.pdf", phi_vs_theta, width = 8, height = 6)
 ggsave("~/Desktop/phi_vs_relative_bulk_amplitude.pdf", phi_vs_relative_amp, width = 8, height = 6)
+ggsave("~/Desktop/phi_vs_G.pdf", phi_vs_G, width = 8, height = 6)
 ```
